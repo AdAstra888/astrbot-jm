@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-JMComic 下载插件 - 最终版 3.0.0
+JMComic 下载插件 - 3.1.0
 - 修复 PDF 混用多个本子图片的问题
-- 通过第一个章节图片目录推断本子根目录，支持有/无章节子文件夹
+- 下载目录按用户隔离，避免并发下载和清理互相影响
+- 清理前校验目标路径，after_send 支持延迟删除
 - 封面统一保存到 covers 目录
 - 支持配置 cover_keep_days 和 default_pdf_quality
 - 自动依赖安装（阿里源）
@@ -54,7 +55,7 @@ from datetime import datetime, timedelta
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
-from astrbot.api.message_components import Plain, File, Node
+from astrbot.api.message_components import Plain, File
 from astrbot.api.message_components import Image as MsgImage
 
 import jmcomic
@@ -87,7 +88,7 @@ except ImportError:
 DEFAULT_OPTION_FILE = Path(__file__).parent / "assets" / "option" / "option_workflow_download.yml"
 
 
-@register("jmcomic_downloader", "JMComic 下载", "禁漫下载插件（支持范围下载、图文详情、智能清理）", "3.0.0")
+@register("jmcomic_downloader", "JMComic 下载", "禁漫下载插件（支持范围下载、图文详情、智能清理）", "3.1.0")
 class JmComicPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -109,23 +110,36 @@ class JmComicPlugin(Star):
             self.option_file = None
             logger.warning("未找到默认 option 配置文件，使用 jmcomic 内置默认配置")
 
-        self.cleanup_mode = self.config.get("cleanup_mode", "count")
-        self.max_albums = self.config.get("max_albums", 10) if self.cleanup_mode == "count" else 0
-        self.cover_keep_days = self.config.get("cover_keep_days", 7)
-        self.default_pdf_quality = self.config.get("default_pdf_quality", 85)
+        self.cleanup_mode = str(self.config.get("cleanup_mode", "count")).lower()
+        if self.cleanup_mode not in {"count", "after_send"}:
+            logger.warning(f"未知清理模式 {self.cleanup_mode!r}，已回退为 count")
+            self.cleanup_mode = "count"
+        self.max_albums = max(0, int(self.config.get("max_albums", 10)))
+        self.after_send_delay = max(0, int(self.config.get("after_send_delay", 60)))
+        self.cover_keep_days = max(0, int(self.config.get("cover_keep_days", 7)))
+        self.default_pdf_quality = int(self.config.get("default_pdf_quality", 85))
         self.default_pdf_quality = max(1, min(100, self.default_pdf_quality))
 
         if not self.config.get("enable_jm_log", False):
             JmModuleConfig.disable_jm_log()
 
+        self._background_tasks = set()
+        self._warmup_task = None
         self._need_warmup = True
-        try:
-            asyncio.create_task(self._warmup())
-            self._need_warmup = False
-        except RuntimeError:
+        self._warmup_task = self._start_task(self._warmup)
+        if self._warmup_task is None:
             logger.warning("无事件循环，预热推迟到首次请求")
+        self._start_task(self._cleanup_expired_covers)
 
-        asyncio.create_task(self._cleanup_expired_covers())
+    def _start_task(self, async_func, *args):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task = loop.create_task(async_func(*args))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def _warmup(self):
         try:
@@ -135,19 +149,34 @@ class JmComicPlugin(Star):
             logger.warning(f"预热域名失败: {e}")
 
     def _safe_user_dir(self, user_id: str) -> str:
-        safe = re.sub(r'[^a-zA-Z0-9_-]', '_', user_id)
+        safe = re.sub(r'[^a-zA-Z0-9_-]', '_', str(user_id or ""))
         return safe or "unknown_user"
 
+    def _user_base_dir(self, user_id: str, create: bool = False) -> Path:
+        user_dir = self.global_base_dir / self._safe_user_dir(user_id)
+        if create:
+            user_dir.mkdir(parents=True, exist_ok=True)
+        return user_dir
+
+    @staticmethod
+    def _is_within(path: Path, parent: Path) -> bool:
+        try:
+            resolved = path.resolve()
+            parent_resolved = parent.resolve()
+            return resolved != parent_resolved and parent_resolved in resolved.parents
+        except (OSError, RuntimeError):
+            return False
+
     async def _get_option(self, user_id: str = None, cmd_overrides: dict = None) -> Optional['JmOption']:
-        if self._need_warmup:
-            asyncio.create_task(self._warmup())
+        if self._need_warmup and (self._warmup_task is None or self._warmup_task.done()):
+            self._warmup_task = self._start_task(self._warmup)
         try:
             if self.option_file and Path(self.option_file).exists():
                 option = await asyncio.to_thread(create_option_by_file, self.option_file)
             else:
                 option = await asyncio.to_thread(JmOption.default)
 
-            option.dir_rule.base_dir = str(self.global_base_dir)
+            option.dir_rule.base_dir = str(self._user_base_dir(user_id, create=True))
 
             if cmd_overrides:
                 self._apply_overrides(option, cmd_overrides)
@@ -215,6 +244,102 @@ class JmComicPlugin(Star):
                 return detail
         return RangeDownloader
 
+    def _iter_image_files(self, image_dir: Path) -> List[Path]:
+        if not image_dir.exists() or image_dir == self.global_base_dir:
+            return []
+        image_suffixes = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+        return sorted(
+            f for f in image_dir.rglob("*")
+            if f.is_file() and f.suffix.lower() in image_suffixes
+        )
+
+    def _find_album_image_dir(
+        self,
+        album_id: str,
+        preferred_dir: Optional[Path] = None,
+        user_id: Optional[str] = None,
+        album_title: str = "",
+    ) -> Optional[Path]:
+        candidates = []
+        if preferred_dir:
+            candidates.append(preferred_dir)
+
+        search_roots = []
+        if user_id:
+            search_roots.append(self.global_base_dir / self._safe_user_dir(user_id))
+        search_roots.append(self.global_base_dir)
+
+        title_parts = [part for part in re.split(r'\s+', album_title) if len(part) >= 3]
+        for root in search_roots:
+            if root.exists():
+                candidates.append(root)
+                for path in root.rglob("*"):
+                    if not path.is_dir():
+                        continue
+                    if album_id in path.name or any(part in path.name for part in title_parts):
+                        candidates.append(path)
+
+                for image in self._iter_image_files(root):
+                    candidates.append(image.parent)
+
+        if self.cover_dir.exists():
+            try:
+                cover_dir_resolved = self.cover_dir.resolve()
+                candidates = [
+                    path for path in candidates
+                    if path.resolve() != cover_dir_resolved and cover_dir_resolved not in path.resolve().parents
+                ]
+            except Exception:
+                pass
+
+        now = time.time()
+        preferred_root = None
+        preferred_dir_resolved = None
+        if user_id:
+            preferred_root = self.global_base_dir / self._safe_user_dir(user_id)
+        if preferred_dir:
+            try:
+                preferred_dir_resolved = preferred_dir.resolve()
+            except Exception:
+                pass
+
+        seen = set()
+        usable = []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved == self.global_base_dir:
+                continue
+            if preferred_root:
+                try:
+                    preferred_root_resolved = preferred_root.resolve()
+                    if resolved == preferred_root_resolved:
+                        continue
+                    if resolved != preferred_root_resolved and preferred_root_resolved not in resolved.parents:
+                        continue
+                except Exception:
+                    pass
+            images = self._iter_image_files(resolved)
+            if images:
+                newest = max(f.stat().st_mtime for f in images)
+                is_recent = now - newest <= 15 * 60
+                title_match = any(part in resolved.name for part in title_parts)
+                id_match = album_id in resolved.name
+                preferred_match = preferred_dir_resolved == resolved
+                score = sum((id_match, title_match, is_recent, preferred_match))
+                usable.append((score, len(images), newest, resolved))
+
+        if not usable:
+            return None
+
+        usable.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return usable[0][3]
+
     def _parse_album_command(self, args: List[str], cmd_prefix_len: int) -> Tuple[str, Optional[Tuple[int, int]], Dict[str, Any]]:
         if len(args) <= cmd_prefix_len:
             raise ValueError("缺少本子ID")
@@ -263,10 +388,10 @@ class JmComicPlugin(Star):
         if range_tuple:
             overrides['chapter_range'] = range_tuple
             start, end = range_tuple
-            yield event.plain_result(f"开始下载 {album_id} 第{start}~{end}章喵")
+            yield event.plain_result(f"开始下载 {album_id} 第{start}~{end}章")
         else:
-            yield event.plain_result(f"开始下载 {album_id}喵")
-        asyncio.create_task(self._download_album_task(event, album_id, pack=False, overrides=overrides, extra=extra))
+            yield event.plain_result(f"开始下载 {album_id}")
+        self._start_task(self._download_album_task, event, album_id, False, overrides, extra)
 
     @filter.command("jmz")
     async def command_jmz(self, event: AstrMessageEvent):
@@ -284,23 +409,23 @@ class JmComicPlugin(Star):
         if range_tuple:
             overrides['chapter_range'] = range_tuple
             start, end = range_tuple
-            yield event.plain_result(f"开始打包 {album_id} 第{start}~{end}章喵")
+            yield event.plain_result(f"开始打包 {album_id} 第{start}~{end}章")
         else:
-            yield event.plain_result(f"开始打包 {album_id}喵")
-        asyncio.create_task(self._download_album_task(event, album_id, pack=True, overrides=overrides, extra=extra))
+            yield event.plain_result(f"开始打包 {album_id}")
+        self._start_task(self._download_album_task, event, album_id, True, overrides, extra)
 
     @filter.command("jms")
     async def command_jms(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
         if len(args) < 2:
-            yield event.plain_result("请提供搜索关键词哦")
+            yield event.plain_result("请提供搜索关键词")
             return
         keyword = args[1]
         page = 1
         if len(args) >= 3 and args[2].isdigit():
             page = int(args[2])
         yield event.plain_result(f"搜索「{keyword}」第{page}页")
-        asyncio.create_task(self._do_search(event, keyword, page))
+        self._start_task(self._do_search, event, keyword, page)
 
     @filter.command("jmr")
     async def command_jmr(self, event: AstrMessageEvent):
@@ -312,8 +437,8 @@ class JmComicPlugin(Star):
                 rank_type = args[1].lower()
             if len(args) >= 3 and args[2].isdigit():
                 page = int(args[2])
-        yield event.plain_result(f"获取{rank_type}榜第{page}页喵")
-        asyncio.create_task(self._do_ranking(event, rank_type, page))
+        yield event.plain_result(f"获取{rank_type}榜第{page}页")
+        self._start_task(self._do_ranking, event, rank_type, page)
 
     @filter.command("jm detail")
     async def command_detail(self, event: AstrMessageEvent):
@@ -328,7 +453,7 @@ class JmComicPlugin(Star):
     @filter.command("jm help")
     async def command_help(self, event: AstrMessageEvent):
         help_text = """
-【jm下载插件使用说明】
+【禁漫下载插件使用说明】
 
 /jm download <本子号> [范围] [--quality=80] [--max-size=1920]
     下载本子，生成PDF。范围示例：1-10 或 5，压缩参数可选。
@@ -359,9 +484,7 @@ class JmComicPlugin(Star):
             return False
 
         try:
-            image_files = sorted(
-                [f for f in image_dir.rglob("*") if f.is_file() and f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp')]
-            )
+            image_files = self._iter_image_files(image_dir)
             logger.info(f"在 {image_dir.resolve()} 找到 {len(image_files)} 个图片文件")
             if image_files:
                 logger.debug(f"前5个文件: {[f.name for f in image_files[:5]]}")
@@ -438,9 +561,10 @@ class JmComicPlugin(Star):
             first_photo = album[0]
             first_photo_dir = Path(option.decide_image_save_dir(first_photo)).resolve()
             logger.info(f"第一个章节图片目录: {first_photo_dir}")
+            user_base_dir = self._user_base_dir(user_id)
 
             # 判断是否有章节子文件夹
-            if first_photo_dir.parent == self.global_base_dir:
+            if first_photo_dir.parent == user_base_dir.resolve():
                 # 图片直接保存在本子目录下（无章节子文件夹）
                 album_dir = first_photo_dir
             else:
@@ -450,7 +574,7 @@ class JmComicPlugin(Star):
             logger.info(f"最终图片下载目录: {album_dir}")
 
             # 安全校验
-            if album_dir == self.global_base_dir:
+            if album_dir in {self.global_base_dir.resolve(), user_base_dir.resolve()}:
                 logger.error("仍然无法确定正确的本子目录，终止下载")
                 await event.send(event.plain_result("无法确定本子图片目录，请检查配置"))
                 return
@@ -460,6 +584,16 @@ class JmComicPlugin(Star):
                 await event.send(event.plain_result("图片目录未创建，下载可能失败"))
                 return
 
+            resolved_album_dir = self._find_album_image_dir(album_id, album_dir, user_id, getattr(album, "title", ""))
+            if resolved_album_dir is None:
+                logger.warning(f"没有找到图片，推断目录: {album_dir}, 下载根目录: {self.global_base_dir}")
+                await event.send(event.plain_result("下载完成但没有找到图片，请稍后重试或检查 jmcomic 配置"))
+                return
+
+            if resolved_album_dir != album_dir:
+                logger.info(f"使用兜底找到的图片目录: {resolved_album_dir}")
+                album_dir = resolved_album_dir
+
             if pack:
                 zip_path = await self._handle_zip_result(event, album_id, album_dir)
                 if zip_path:
@@ -468,14 +602,14 @@ class JmComicPlugin(Star):
                 quality = int(extra.get('quality', self.default_pdf_quality))
                 max_size = int(extra.get('max-size', 0))
 
-                pdf_dir = self.global_base_dir / "pdfs"
+                pdf_dir = self._user_base_dir(user_id, create=True) / "pdfs"
                 pdf_dir.mkdir(parents=True, exist_ok=True)
                 pdf_path = pdf_dir / f"{album_id}.pdf"
 
                 success = await self._generate_compressed_pdf(album_dir, pdf_path, quality, max_size)
                 if success:
                     await event.send(event.chain_result([
-                        Plain(f"本子 {album_id} 下载完成喵，已转换为 PDF（质量={quality}）："),
+                        Plain(f"本子 {album_id} 下载完成，已转换为 PDF（质量={quality}）："),
                         File(file=str(pdf_path), name=pdf_path.name)
                     ]))
                     sent_files.append(pdf_path)
@@ -484,9 +618,9 @@ class JmComicPlugin(Star):
 
             # 清理逻辑
             if sent_files and self.cleanup_mode == "after_send":
-                asyncio.create_task(self._delete_after_send(album_dir, sent_files))
+                self._start_task(self._delete_after_send, user_id, album_dir, sent_files)
             elif self.cleanup_mode == "count":
-                asyncio.create_task(self._cleanup_old_albums())
+                self._start_task(self._cleanup_old_albums, user_id)
 
         except Exception as e:
             logger.error(f"下载任务异常: {traceback.format_exc()}")
@@ -523,57 +657,62 @@ class JmComicPlugin(Star):
                     arcname = os.path.relpath(file_path, start=folder.parent)
                     zipf.write(file_path, arcname)
 
-    async def _delete_after_send(self, album_dir: Path, sent_files: List[Path]):
-        try:
-            if album_dir.exists():
-                shutil.rmtree(album_dir, ignore_errors=True)
-                logger.info(f"已删除原图片文件夹: {album_dir}")
-            for f in sent_files:
-                if f.exists():
-                    f.unlink()
-                    logger.info(f"已删除已发送文件: {f}")
-        except Exception as e:
-            logger.error(f"删除失败: {e}")
+    async def _delete_after_send(self, user_id: str, album_dir: Path, sent_files: List[Path]):
+        if self.after_send_delay > 0:
+            await asyncio.sleep(self.after_send_delay)
 
-    async def _cleanup_old_albums(self):
+        user_dir = self._user_base_dir(user_id)
+        targets = [album_dir, *sent_files]
+        await self._run_sync(self._delete_paths_safely, user_dir, targets)
+
+    def _delete_paths_safely(self, user_dir: Path, targets: List[Path]):
+        for target in targets:
+            if not self._is_within(target, user_dir):
+                logger.error(f"拒绝清理用户目录以外的路径: {target}")
+                continue
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
+                logger.info(f"已清理: {target}")
+            except Exception as e:
+                logger.error(f"清理失败 {target}: {e}")
+
+    async def _cleanup_old_albums(self, user_id: str):
         if self.cleanup_mode != "count" or self.max_albums <= 0:
             return
-        exclude_dirs = {"pdfs", "covers", "logs"}
+
+        user_dir = self._user_base_dir(user_id)
+        if not user_dir.exists():
+            return
+        exclude_dirs = {"pdfs", "logs"}
         try:
-            album_dirs = [d for d in self.global_base_dir.iterdir() if d.is_dir() and d.name not in exclude_dirs]
+            album_dirs = [d for d in user_dir.iterdir() if d.is_dir() and d.name not in exclude_dirs]
         except Exception as e:
-            logger.error(f"读取根目录失败: {e}")
+            logger.error(f"读取用户下载目录失败 {user_dir}: {e}")
             return
-        if len(album_dirs) <= self.max_albums:
-            return
+
         album_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         to_delete = album_dirs[self.max_albums:]
-        await self._run_sync(self._delete_album_folders, to_delete)
+        targets = [path for folder in to_delete for path in (folder, folder.with_suffix(".zip"))]
 
-    def _delete_album_folders(self, folders: List[Path]):
-        pdf_dir = self.global_base_dir / "pdfs"
-        for folder in folders:
-            album_id = folder.name
-            if folder.exists():
-                try:
-                    shutil.rmtree(folder, ignore_errors=True)
-                    logger.info(f"已删除旧本子文件夹: {folder}")
-                except Exception as e:
-                    logger.error(f"删除文件夹失败 {folder}: {e}")
-            if pdf_dir.exists():
-                try:
-                    for pf in pdf_dir.glob(f"{album_id}*.pdf"):
-                        pf.unlink()
-                        logger.info(f"已删除旧 PDF 文件: {pf}")
-                except Exception as e:
-                    logger.error(f"删除 PDF 失败: {e}")
-            zip_file = folder.with_suffix(".zip")
-            if zip_file.exists():
-                try:
-                    zip_file.unlink()
-                    logger.info(f"已删除旧 ZIP 文件: {zip_file}")
-                except Exception as e:
-                    logger.error(f"删除 ZIP 失败: {e}")
+        pdf_dir = user_dir / "pdfs"
+        if pdf_dir.exists():
+            pdf_files = sorted(
+                (p for p in pdf_dir.glob("*.pdf") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            targets.extend(pdf_files[self.max_albums:])
+
+        zip_files = sorted(
+            (p for p in user_dir.glob("*.zip") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        targets.extend(zip_files[self.max_albums:])
+        await self._run_sync(self._delete_paths_safely, user_dir, list(dict.fromkeys(targets)))
 
     async def _do_search(self, event: AstrMessageEvent, keyword: str, page: int):
         try:
@@ -594,7 +733,7 @@ class JmComicPlugin(Star):
             search_page = await self._safe_call_with_timeout(client.search, timeout=60, **search_kwargs)
             content = search_page.content if hasattr(search_page, 'content') else list(search_page) if search_page else []
             if not content:
-                await event.send(event.plain_result("没有找到相关本子喵"))
+                await event.send(event.plain_result("没有找到相关本子"))
                 return
             lines = [f"搜索「{keyword}」结果（第{page}/{getattr(search_page, 'page_count', 1)}页）："]
             for idx, (aid, info) in enumerate(content[:10], 1):
@@ -603,7 +742,7 @@ class JmComicPlugin(Star):
             lines.append(f"共{getattr(search_page, 'total', len(content))}条")
             await event.send(event.plain_result("\n".join(lines)))
         except (asyncio.TimeoutError, TimeoutError):
-            await event.send(event.plain_result("搜索超时，请稍后重试喵"))
+            await event.send(event.plain_result("搜索超时，请稍后重试"))
         except Exception as e:
             logger.error(traceback.format_exc())
             await event.send(event.plain_result(f"搜索失败: {e}"))
@@ -632,7 +771,7 @@ class JmComicPlugin(Star):
             lines.append(f"共{len(content)}条")
             await event.send(event.plain_result("\n".join(lines)))
         except (asyncio.TimeoutError, TimeoutError):
-            await event.send(event.plain_result("获取排行榜超时，请稍后重试喵"))
+            await event.send(event.plain_result("获取排行榜超时，请稍后重试"))
         except Exception as e:
             logger.error(traceback.format_exc())
             await event.send(event.plain_result(f"获取排行榜失败: {e}"))
@@ -684,7 +823,7 @@ class JmComicPlugin(Star):
             else:
                 lines.append("该本子暂无章节")
 
-            node_content = [Plain("\n".join(lines))]
+            message_chain = [Plain("\n".join(lines))]
 
             try:
                 cover_filename = f"cover_{album_id}_{int(time.time())}.jpg"
@@ -692,17 +831,20 @@ class JmComicPlugin(Star):
 
                 await self._run_sync(client.download_album_cover, album_id, str(cover_path))
                 cover_path.chmod(0o644)
-                node_content.append(MsgImage.fromFileSystem(str(cover_path)))
+                message_chain.append(MsgImage.fromFileSystem(str(cover_path)))
                 logger.info(f"封面已保存到: {cover_path}")
             except Exception as e:
                 logger.warning(f"下载封面失败: {e}")
 
-            bot_uin = event.get_self_id() or 10000
-            node = Node(uin=bot_uin, name="JMComic Bot", content=node_content)
-            yield event.chain_result([node])
+            yield event.chain_result(message_chain)
 
         except Exception as e:
             await event.send(event.plain_result(f"获取详情失败: {e}"))
 
     async def terminate(self):
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("禁漫插件已卸载")

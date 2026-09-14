@@ -1,259 +1,169 @@
-# AstrBot jm漫画下载搜索插件
+# AstrBot JMComic 下载搜索插件
 
-[![AGPL-3.0 License](https://img.shields.io/github/license/suiseikat/astrbot_plugin_jmcomic)](LICENSE)
+[![AGPL-3.0 License](https://img.shields.io/github/license/suiseikat/astrbot_plugin_jmcomics)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 
-本插件为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供了JMComic的搜索、下载、自动生成 PDF 或 ZIP 打包功能，支持**范围下载**、**排行榜**、**图文详情**，并内置两种磁盘清理模式，有效管理存储空间。
+为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 JMComic 搜索、排行榜、详情查询、漫画下载以及 PDF/ZIP 文件发送功能。
 
----
+## 功能
 
-## ✨ 功能亮点
+- `/jm download`：下载整本或指定章节，转换为 PDF 后发送。
+- `/jmz`：下载整本或指定章节，打包为 ZIP 后发送。
+- `/jms`：按关键词搜索。
+- `/jmr`：查看月榜、周榜或日榜。
+- `/jm detail`：直接发送本子文字详情和封面，不使用合并转发消息。
+- 下载内容按发送者分目录保存，避免不同用户的文件和清理任务互相影响。
+- 支持按数量保留或发送后延迟删除两种清理模式。
 
-- 📥 **下载本子/章节**  
-  - 默认下载后自动转换为 PDF 文件并发送。  
-  - 支持 `/jmz` 命令，打包为 ZIP 压缩包发送。  
-  - 支持**范围下载**，例如 `/jm download 123 1-5` 仅下载第 1~5 章。
+## 安装
 
-- 🔍 **搜索本子**  
-  - 支持关键词搜索，分页显示结果。  
-  - 命令 `/jms <关键词> [页码]`，默认第 1 页。
+进入 AstrBot 的插件目录并克隆仓库：
 
-- 📊 **排行榜**  
-  - 获取月榜、周榜、日榜。  
-  - 命令 `/jmr [week|day] [页码]`，默认月榜第 1 页。
-
-- 📄 **图文详情**  
-  - 查看本子标题、作者、收藏数、标签、章节列表。  
-  - **附带封面图片**，以合并转发消息发送。  
-  - 命令 `/jm detail <本子号>`。
-
-- 🧹 **智能清理**  
-  - **count 模式**：每个用户最多保留 N 个本子（默认 10 个），超过自动删除最旧。  
-  - **after_send 模式**：每次发送后立即删除本次下载的所有文件（原图 + PDF/ZIP）。  
-  - 可在 AstrBot 管理面板自由切换。
-
-- 📦 **自动依赖安装**  
-  - 首次运行时自动检测并安装 `jmcomic`、`Pillow`、`img2pdf` 等依赖，无需手动操作。
-
-- 🌐 **跨平台兼容**  
-  - 所有路径基于插件目录动态生成，无论部署在何处均可正常运行。
-
-- 🧪 **异常日志**  
-  - 下载失败时会记录详细错误日志，便于排查问题。
-
----
-
-## 📦 安装方法
-
-### 方法一：通过 GitHub 克隆（推荐）
-
-1. 进入 AstrBot 的插件目录：
-   ```bash
-   cd /path/to/AstrBot/data/plugins/
+```bash
+cd /path/to/AstrBot/data/plugins
+git clone https://github.com/suiseikat/astrbot_plugin_jmcomics.git
 ```
 
-1. 克隆本仓库：
-   ```bash
-   git clone https://github.com/suiseikat/astrbot_plugin_jmcomic.git
-   ```
-2. 重启 AstrBot。插件首次加载时会自动安装所需依赖。
+随后重启 AstrBot。也可以下载仓库 ZIP，解压到 `data/plugins/astrbot_plugin_jmcomics` 后重启。
 
-方法二：手动安装（ZIP 上传）
+插件会检查 `jmcomic`、`Pillow` 和 `img2pdf`。如果自动安装失败，请在 AstrBot 的 Python 环境中手动安装 `requirements.txt` 中的依赖。
 
-如果使用 AstrBot 后台的“上传插件”功能遇到临时目录问题，建议直接使用文件夹安装：
+## 使用
 
-1. 下载本仓库的 ZIP 文件并解压。
-2. 将解压后的文件夹（例如 astrbot_plugin_jmcomic）复制到 AstrBot 的 data/plugins/ 目录下。
-3. 重启 AstrBot。
+### 下载 PDF
 
----
-
-🚀 使用说明
-
-所有命令以 /jm 开头，支持在群聊或私聊中使用。
-
-下载本子（PDF）
-
+```text
+/jm download <本子号> [范围] [--quality=80] [--max-size=1920]
 ```
-/jm download <本子号> [范围]
-```
-
-· 默认（不加范围）：下载本子全部章节 → 合并为 PDF → 发送 PDF 文件。
-· 加范围：1-10 或 5，下载指定章节。
 
 示例：
 
-```
+```text
 /jm download 123
 /jm download 123 1-5
-/jm download 123 3
+/jm download 123 3 --quality=80 --max-size=1920
 ```
 
-下载本子（ZIP 打包）
+`quality` 范围为 1-100；`max-size` 为图片最长边像素，`0` 表示不缩放。
 
-```
+### 下载 ZIP
+
+```text
 /jmz <本子号> [范围]
 ```
 
-· 下载本子 → 打包为 ZIP → 发送 ZIP 文件。
+### 搜索与排行榜
 
-示例：
-
-```
-/jmz 123
-/jmz 123 1-5
-```
-
-搜索本子
-
-```
+```text
 /jms <关键词> [页码]
-```
-
-默认页码为 1，最多显示前 10 条结果。
-
-示例：
-
-```
-/jms 火影
-/jms 海贼王 2
-```
-
-排行榜
-
-```
 /jmr [week|day] [页码]
 ```
 
-· 不加参数：月榜第 1 页。
-· 加 week：周榜。
-· 加 day：日榜。
-· 可选页码。
+`/jmr` 不加类型时显示月榜。
 
-示例：
+### 查看详情
 
-```
-/jmr
-/jmr week 2
-/jmr day
-```
-
-查看本子详情
-
-```
+```text
 /jm detail <本子号>
 ```
 
-返回一条合并转发消息，包含标题、作者、收藏数、标签、前 10 个章节列表，并附带封面图片。
+直接发送标题、作者、收藏数、标签、前 10 个章节和封面图片。封面下载失败时仍会发送文字详情。
 
-示例：
+### 帮助
 
-```
-/jm detail 1251656
-```
-<img width="642" height="1389" alt="image" src="https://github.com/user-attachments/assets/18a838de-d6b1-44a9-b6a3-97e0c0525612" />
-
-帮助
-
-```
+```text
 /jm help
 ```
 
-显示所有命令及使用示例。
+## 配置
 
----
-
-## ⚙️ 配置选项
-
-在 AstrBot 管理面板的插件配置页，可以为该插件添加以下配置（`_conf_schema.json` 已内置）：
+在 AstrBot 管理面板的插件配置页修改：
 
 | 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `download_dir` | string | `./data/jm_downloads` | 下载根目录，所有下载的文件将保存在此目录下。 |
-| `cleanup_mode` | string | `count` | 清理模式：`count`（按数量保留）或 `after_send`（发送后立即删除本次下载的所有文件）。 |
-| `max_albums` | int | `10` | 当 `cleanup_mode` 为 `count` 时，每个用户最多保留的本子数量（0 表示不限制）。 |
-| `delete_temp_cover` | bool | `true` | 详情指令中，发送封面图片后是否删除临时封面文件。 |
-| `enable_jm_log` | bool | `false` | 是否显示 jmcomic 库的内部调试日志（用于排查问题）。 |
-| `option_file` | string | `""` | 自定义 jmcomic 选项配置文件路径（YAML 格式），留空则使用内置默认配置。 |
+| --- | --- | --- | --- |
+| `download_dir` | string | `./data/jm_downloads` | 下载根目录；相对路径以 AstrBot 工作目录为基准。 |
+| `cleanup_mode` | string | `count` | `count` 按数量保留；`after_send` 在发送完成后延迟删除。 |
+| `max_albums` | int | `10` | `count` 模式下每个用户保留的本子、PDF 和 ZIP 数量；`0` 表示不限制。 |
+| `after_send_delay` | int | `60` | `after_send` 模式在发送调用完成后等待多少秒再删除，避免适配器仍在读取文件。 |
+| `cover_keep_days` | int | `7` | 封面保留天数；`0` 表示永久保留。 |
+| `default_pdf_quality` | int | `85` | 默认 PDF 图片质量，范围 1-100。 |
+| `enable_jm_log` | bool | `false` | 是否显示 jmcomic 调试日志。 |
+| `option_file` | string | 空 | 自定义 jmcomic YAML 配置路径；为空时使用内置默认配置。 |
 
-修改配置后，**需要重启 AstrBot 才能生效**。
+修改配置后请重启或重新加载插件。
 
----
+## 清理机制
 
-📁 文件结构
+插件将新下载内容放在：
 
+```text
+<download_dir>/<用户ID>/
+├── <本子目录>/
+├── <本子压缩包>.zip
+└── pdfs/
+    └── <本子ID>.pdf
 ```
-astrbot_plugin_jmcomic/
-├── _conf_schema.json      # 插件配置定义
-├── main.py                 # 插件主代码
-├── jmcomic/                # jmcomic 库（已集成，无需额外安装）
-│   └── ...                 # 库文件
+
+`count` 模式只检查当前完成下载的用户目录，并分别保留最新的 `max_albums` 个本子目录、PDF 和 ZIP。删除前会验证目标必须位于该用户目录内，不会删除下载根目录、其他用户目录或外部路径。
+
+`after_send` 模式会先等待文件发送调用完成，再等待 `after_send_delay` 秒，最后删除本次原图和生成的 PDF/ZIP。建议 QQ 官方机器人等平台保留默认的 60 秒缓冲；如遇到平台异步上传较慢，可以调大该值。
+
+封面不受以上两种模式影响，由 `cover_keep_days` 独立清理。旧版本遗留在用户目录之外的下载不会被自动删除，避免升级时误删数据。
+
+## Docker 部署
+
+AstrBot 容器必须持久化挂载 `/AstrBot/data`，否则重建或升级容器会丢失插件配置和下载文件：
+
+```bash
+docker run -d \
+  --name astrbot \
+  -v /宿主机/astrbot_data:/AstrBot/data \
+  soulter/astrbot:latest
+```
+
+QQ 官方机器人适配器由 AstrBot 自己读取并上传文件，只要 AstrBot 容器能访问生成路径即可。
+
+如果使用 NapCat，并且适配器只把本地文件路径交给 NapCat，则 NapCat 也必须把同一个宿主机目录挂载到相同的 `/AstrBot/data` 路径：
+
+```bash
+docker run -d \
+  --name napcat \
+  -v /宿主机/astrbot_data:/AstrBot/data \
+  ...
+```
+
+仅在 Compose 或启动命令中写了挂载还不够；修改后必须重新创建容器，并用 `docker inspect` 确认挂载已经生效。
+
+## 常见问题
+
+### 下载完成后提示没有找到图片
+
+插件会先使用 jmcomic 推断的目录，再在当前用户目录内按本子 ID、标题和修改时间寻找实际图片目录。仍然失败时，请打开 `enable_jm_log` 并检查自定义 `option_file` 的目录规则。
+
+### PDF 无法发送或提示文件不存在
+
+确认 PDF 已生成，并确认 AstrBot 能读取 `<download_dir>/<用户ID>/pdfs/`。Docker 用户还需要确认 `/AstrBot/data` 持久化挂载已实际应用。使用 `after_send` 时可适当增大 `after_send_delay`。
+
+### PDF 没有生成
+
+检查日志中是否有 Pillow 或 img2pdf 错误，并确认容器内有足够磁盘空间。
+
+## 文件结构
+
+```text
+astrbot_plugin_jmcomics/
 ├── assets/
-│   └── option/
-│       └── option_workflow_download.yml  # 默认 jmcomic 配置文件（可选）
-└── README.md               # 本文件
+├── _conf_schema.json
+├── main.py
+├── metadata.yaml
+├── requirements.txt
+└── README.md
 ```
 
----
+## 许可证与致谢
 
-❓ 常见问题
+本项目采用 [AGPL-3.0](LICENSE) 许可证。
 
-Q: 上传 ZIP 安装时提示 FileNotFoundError: [Errno 2] No such file or directory
-
-A: 这是 AstrBot 临时目录不存在导致的。请使用方法一（git clone） 或方法二（手动解压复制文件夹） 安装，无需上传 ZIP。
-
-Q: 下载后没有生成 PDF？
-
-A: 请检查是否成功安装了 img2pdf。插件会自动尝试安装，若失败请手动执行 pip install img2pdf。也可查看插件日志（位于 下载目录/logs/）获取详细错误。
-
-Q: 如何修改默认保留的本子数量？
-
-A: 在插件配置中设置 max_albums 项，并将 cleanup_mode 设为 count。
-
-Q: 是否支持多用户隔离？
-
-A: 支持。每个用户（QQ 号）拥有独立的下载子目录，清理操作也仅针对当前用户。
-
-Q: 详情命令不显示封面？
-
-A: 可能是封面下载失败，请检查网络和 jmcomic 配置。如果不需要封面，可以忽略该错误，插件仍会发送文本详情。
-
-Q: 插件在 Docker 部署的 AstrBot 中无法发送文件（PDF/ZIP），提示找不到文件？或者 NapCat 报错“文件消息缺少参数”？
-
-A: 这是因为 Docker 容器的文件系统与宿主机隔离，插件生成的文件默认保存在容器内部，外部无法访问。
-解决方法：
-
-1. 运行 AstrBot 容器时，将宿主机的持久化目录挂载到容器内的 /AstrBot/data。
-   ```bash
-   docker run -d \
-     --name astrbot \
-     -v /宿主机/astrbot_data:/AstrBot/data \
-     soulter/astrbot:latest
-   ```
-   · /宿主机/astrbot_data 是你宿主机上用于存储 AstrBot 数据的目录（可自行创建）。
-2. 运行 NapCat 容器时，也需要将同一个宿主机目录挂载到 NapCat 容器内的 /AstrBot/data。
-   ```bash
-   docker run -d \
-     --name napcat \
-     -v /宿主机/astrbot_data:/AstrBot/data \
-     ...   # 其他 NapCat 参数
-   ```
-   · 这样 NapCat 就能直接读取 AstrBot 插件下载的 PDF/ZIP 文件，解决“文件消息缺少参数”错误。
-
-· 如果已经运行了容器，请先停止并删除旧容器，再重新创建。
-
----
-
-📄 许可证
-
-本项目采用 AGPL-3.0 许可证。详情请参阅 LICENSE 文件。
-
----
-
-🙏 致谢
-
-· hect0x7/JMComic-Crawler-Python – 强大的禁漫爬虫库。
-· Soulter/AstrBot – AstrBot插件模板
-
-如有任何问题或建议，欢迎提交 Issue 或 Pull Request。
+- [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python)
+- [AstrBot](https://github.com/AstrBotDevs/AstrBot)
 
