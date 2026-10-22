@@ -1,6 +1,6 @@
 name: astrbot_plugin_jmcomics
 display_name: jm漫画下载搜索
-desc: 提供 JMComic 搜索、下载、PDF/ZIP 发送、排行榜、图文详情和安全的按用户清理功能。
-version: v3.1.0
+desc: 提供 JMComic 搜索、下载、PDF/ZIP 发送、排行榜、图文详情，以及下载进度、停止下载、定时清理、并发控制和 PDF 缓存。
+version: 3.3.0
 author: SuiseiKat
-repo: https://github.com/suiseikat/astrbot_plugin_jmcomics
+repo: https://github.com/AdAstra888/astrbot-jm

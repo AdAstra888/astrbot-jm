@@ -1,11 +1,4 @@
-curl_cffi
-commonX
-PyYAML
-Pillow
-psutil
-pycryptodome
-requests
-plugin_jm_server
-zhconv
-img2pdf
-jmcomic
+# 直接依赖（其余依赖由 jmcomic 自行携带，无需在此重复声明）
+jmcomic>=2.7.0,<3.0.0
+img2pdf>=0.4.4,<0.7
+Pillow>=9.6,<13

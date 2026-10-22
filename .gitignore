@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 本地测试与临时构建产物
+tests/.tmp*/
+.pytest_cache/
+.jm_pdf_*/
+.testdeps/
+pip-build-tracker-*/
+pip-ephem-wheel-cache-*/
+pip-install-*/
+pip-target-*/
+pip-unpack-*/
+

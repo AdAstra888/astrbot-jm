@@ -1,6 +1,6 @@
 {
   "download_dir": {
-    "description": "下载根目录，所有下载的文件将保存在此目录下（支持绝对路径或相对 AstrBot 工作目录的路径）",
+    "description": "下载根目录，所有下载的文件和缓存都保存在此目录下（支持绝对路径或相对 AstrBot 工作目录的路径）",
     "type": "string",
     "default": "./data/jm_downloads"
   },
@@ -21,9 +21,9 @@
   "after_send_delay": {
     "description": "after_send 模式下，发送调用完成后延迟多少秒再删除文件",
     "type": "int",
-    "default": 60,
+    "default": 10,
     "min": 0,
-    "hint": "异步上传平台建议保留 60 秒或设置更长时间"
+    "hint": "异步上传平台可适当调大，避免适配器还没读完文件就被删除"
   },
   "cover_keep_days": {
     "description": "封面图片保留天数，超过后自动清理",
@@ -38,7 +38,67 @@
     "default": 85,
     "min": 1,
     "max": 100,
-    "hint": "命令行参数 --quality 可临时覆盖此默认值"
+    "hint": "命令行参数 --quality 可临时覆盖此默认值；95 及以上且不缩放时直接复用原图，不二次压缩"
+  },
+  "max_concurrent": {
+    "description": "同时进行的下载任务上限（所有用户合计）",
+    "type": "int",
+    "default": 1,
+    "min": 1,
+    "hint": "个人/小群使用建议保持 1，避免占满带宽和磁盘 IO"
+  },
+  "cooldown_seconds": {
+    "description": "同一用户两次下载之间的最短间隔（秒）",
+    "type": "int",
+    "default": 30,
+    "min": 0,
+    "hint": "只限制下载命令，搜索/详情/排行榜不受影响；0 表示不限制"
+  },
+  "max_file_size_mb": {
+    "description": "发送文件的大小上限（MB），0 表示不检查",
+    "type": "int",
+    "default": 90,
+    "min": 0,
+    "hint": "超过上限时自动降低一级 quality 并限制到 1600px 重试一次，仍超限则提示用户手动调整参数"
+  },
+  "pdf_cache_max": {
+    "description": "PDF 缓存保留数量（全局，按最近使用淘汰）",
+    "type": "int",
+    "default": 30,
+    "min": 0,
+    "hint": "相同本子和参数再次请求时可直接复用缓存，不再下载；0 表示不缓存，PDF 随发送后删除"
+  },
+  "min_free_disk_mb": {
+    "description": "下载前要求的最小剩余磁盘空间（MB），0 表示不检查",
+    "type": "int",
+    "default": 200,
+    "min": 0
+  },
+  "allowed_groups": {
+    "description": "允许使用插件的群号，多个用逗号或空格分隔；留空表示不限制（私聊始终可用）",
+    "type": "string",
+    "default": "",
+    "hint": "仅在群聊中生效。小群自用时建议填上自己的群号，防止被拉进陌生群后滥用"
+  },
+  "progress_updates": {
+    "description": "下载过程中是否推送进度消息",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只在开始和结束时各发一条消息，减少群聊刷屏"
+  },
+  "progress_interval": {
+    "description": "进度消息的最小发送间隔（秒）",
+    "type": "int",
+    "default": 8,
+    "min": 3,
+    "hint": "间隔越大消息越少；低于 3 秒会被自动修正为 3 秒"
+  },
+  "auto_cleanup_days": {
+    "description": "自动清理多少天前的下载文件（0 表示不自动清理）",
+    "type": "int",
+    "default": 0,
+    "min": 0,
+    "hint": "开启后每小时检查一次，超过天数的本子目录、ZIP 和用户目录下的 PDF 会被删除；共用的 PDF 缓存和封面不受影响"
   },
   "enable_jm_log": {
     "description": "是否显示 jmcomic 库的内部调试日志",
@@ -50,6 +110,6 @@
     "description": "自定义 jmcomic 选项配置文件路径（留空则使用内置默认配置）",
     "type": "string",
     "default": "",
-    "hint": "可通过 YAML 配置代理、线程数和目录规则等行为"
+    "hint": "可通过 YAML 配置代理、线程数和目录规则等行为；不存在时会自动回退为内置默认配置"
   }
 }
