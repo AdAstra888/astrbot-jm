@@ -4,7 +4,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 JMComic 搜索、排行榜、详情查询、漫画下载以及 PDF/ZIP 文件发送功能，默认按「个人 / 小群自用」调优。
-
+ps:这些都是ai写的，用dsh和codex轮流拷打完成的，有什么事不关我的事，我直接就是一个甩锅，hh
 ## 功能
 
 - `/jm <本子号>`：下载整本或指定章节，转换为 PDF 后发送。
