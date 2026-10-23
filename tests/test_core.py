@@ -93,9 +93,16 @@ def _install_stubs():
     fake = types.ModuleType("img2pdf")
     fake.LAST_PATHS = []
 
-    def _convert(paths, outputstream=None, **kwargs):
-        fake.LAST_PATHS = list(paths)
+    def _convert(*images, outputstream=None, **kwargs):
+        paths = []
+        for item in images:
+            if isinstance(item, (list, tuple)):
+                paths.extend(str(entry) for entry in item)
+            else:
+                paths.append(str(item))
+        fake.LAST_PATHS = paths
         payload = b"%PDF-1.3 fake\n" + b"\n".join(Path(p).name.encode() for p in paths)
+        payload += b"\n" + b"#" * 300
         outputstream.write(payload)
         return payload
 
@@ -434,7 +441,8 @@ def test_split_subcommand(_tmp_path: Path):
     assert split("/jm s 巨乳 人妻 2") == ("search", ["巨乳", "人妻", "2"])
     assert split("/jm r week 2") == ("rank", ["week", "2"])
     assert split("/jm") == ("help", [])
-    assert split("/jm blah") == ("help", ["blah"])
+    # 不是子命令也不是纯数字 ID，就当成搜索关键词
+    assert split("/jm blah") == ("search", ["blah"])
     # 某些平台会把命令前缀剥掉再交给 handler
     assert split("123") == ("download", ["123"])
     assert split("stop") == ("stop", [])
@@ -561,6 +569,259 @@ def test_stop_without_job(tmp_path: Path):
     assert job["cancel"].is_set()
 
 
+def test_pica_signature_and_headers(tmp_path: Path):
+    from pica.client import PicaClient, _sign
+
+    signature = _sign("comics/abc/eps?page=1", "1700000000", "get")
+    assert len(signature) == 64
+    assert signature == signature.lower()
+    assert _sign("comics/abc/eps?page=1", "1700000000", "get") == signature
+    assert _sign("comics/abc/eps?page=2", "1700000000", "get") != signature
+
+    client = PicaClient(token="tok")
+    headers = client._headers("comics/abc", "GET")
+    assert headers["authorization"] == "tok"
+    assert headers["api-key"].startswith("C69")
+    assert headers["app-version"]
+
+
+def test_pica_image_url(tmp_path: Path):
+    from pica.client import PicaClient
+
+    assert (
+        PicaClient.image_url(
+            {"media": {"fileServer": "https://s3.picacomic.com", "path": "abc.jpg"}}
+        )
+        == "https://s3.picacomic.com/static/abc.jpg"
+    )
+    assert PicaClient.image_url({}) == ""
+
+
+def test_parse_chapter_spec(tmp_path: Path):
+    parse = plugin_module.JmComicPlugin._parse_chapter_spec
+    assert parse("all") is None
+    assert parse("") is None
+    assert parse("3") == [(3, 3)]
+    assert parse("1-5,8") == [(1, 5), (8, 8)]
+    for bad in ("0", "5-1", "x", "-2"):
+        try:
+            parse(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"应当拒绝 {bad}")
+
+
+def test_select_pica_episodes(tmp_path: Path):
+    episodes = [
+        {"_id": "a", "title": "第二话", "order": "2"},
+        {"_id": "b", "title": "第一话", "order": "1"},
+    ]
+    selected = plugin_module.JmComicPlugin._select_pica_episodes(episodes, [(1, 1)])
+    assert [index for index, _ in selected] == [1]
+    assert selected[0][1]["_id"] == "b"
+    everything = plugin_module.JmComicPlugin._select_pica_episodes(episodes, None)
+    assert [index for index, _ in everything] == [1, 2]
+
+
+def test_parse_pica_tokens(tmp_path: Path):
+    parse = plugin_module.JmComicPlugin._parse_pica_tokens
+    assert parse(["abc123", "1-3", "--quality=60"]) == (
+        "abc123",
+        "1-3",
+        {"quality": "60"},
+    )
+    assert parse(["abc123"]) == ("abc123", "all", {})
+    for bad in ([], ["!!"], ["abc123", "1", "2"], ["abc123", "--foo=1"]):
+        try:
+            parse(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"应当拒绝 {bad}")
+
+
+def test_split_pica_subcommand(tmp_path: Path):
+    split = plugin_module.JmComicPlugin._split_pica_subcommand
+    assert split("/pica s 关键词") == ("search", ["关键词"])
+    assert split("/pica 1234567890abcdef12345678") == (
+        "download",
+        ["1234567890abcdef12345678"],
+    )
+    assert split("/pica z abc123") == ("zip", ["abc123"])
+    assert split("/pica") == ("help", [])
+    assert split("/bika stop") == ("stop", [])
+
+
+def test_pica_download_writes_zip(tmp_path: Path):
+    import asyncio
+    import threading
+
+    plugin = build_plugin(tmp_path)
+    plugin.config["pica_concurrency"] = 2
+
+    class _FakeClient:
+        async def comic(self, comic_id):
+            return {"title": "测试本子", "epsCount": 1}
+
+        async def episodes(self, comic_id):
+            return [{"_id": "ep1", "title": "第一话", "order": "1"}]
+
+        async def pages(self, comic_id, ep_id):
+            return [
+                {"media": {"fileServer": "https://x", "path": f"{i}.jpg"}}
+                for i in (1, 2)
+            ]
+
+        def image_url(self, page):
+            return "https://x/static/" + page["media"]["path"]
+
+        async def download_image(self, url, dest):
+            dest.write_bytes(b"fake-jpeg-data")
+
+    async def _fake_send_file(event, path, caption):
+        return True
+
+    plugin._get_pica_client = lambda: _FakeClient()
+    plugin._send_file = _fake_send_file
+    job = {"cancel": threading.Event(), "stage": ""}
+    event = _FakeEvent()
+    targets = asyncio.run(
+        plugin._pica_download_and_send(
+            event, "abc123", "all", None, True, 85, 0, job
+        )
+    )
+    zips = [path for path in targets if str(path).endswith(".zip")]
+    assert zips and zips[0].exists(), targets
+    with zipfile.ZipFile(zips[0]) as archive:
+        assert len(archive.namelist()) == 2
+    assert any("测试本子" in text for text in event.sent)
+
+
+def test_cleanup_expired_pica_per_album(tmp_path: Path):
+    import os
+    import time
+
+    plugin = build_plugin(tmp_path)
+    user_dir = plugin._user_base_dir("u1", create=True)
+    old_album = user_dir / "pica" / "old_1"
+    old_album.mkdir(parents=True)
+    (old_album / "001.jpg").write_bytes(b"x")
+    new_album = user_dir / "pica" / "new_2"
+    new_album.mkdir()
+    (new_album / "001.jpg").write_bytes(b"x")
+    old = time.time() - 10 * 86400
+    os.utime(old_album, (old, old))
+
+    removed = plugin._cleanup_expired(3)
+
+    assert removed == 1
+    assert not old_album.exists()
+    assert new_album.exists()
+    assert (user_dir / "pica").is_dir()
+
+
+def test_cleanup_counts_pica_albums_not_container(tmp_path: Path):
+    import asyncio
+    import os
+    import time
+
+    plugin = build_plugin(tmp_path)
+    plugin.cleanup_mode = "count"
+    plugin.max_albums = 1
+    user_dir = plugin._user_base_dir("u1", create=True)
+
+    jm_album = user_dir / "111"
+    jm_album.mkdir()
+    (jm_album / "001.jpg").write_bytes(b"x")
+    old = time.time() - 3 * 86400
+    os.utime(jm_album, (old, old))
+
+    pica_album = user_dir / "pica" / "abc123_漫画"
+    pica_album.mkdir(parents=True)
+    (pica_album / "001.jpg").write_bytes(b"x")
+
+    asyncio.run(plugin._cleanup_old_albums("u1"))
+
+    assert (user_dir / "pica").is_dir()
+    assert pica_album.is_dir()
+    assert not jm_album.exists()
+
+
+def test_alias_and_keyword_fallback(tmp_path: Path):
+    from pica.plugin import PicaMixin
+
+    split = plugin_module.JmComicPlugin._split_subcommand
+    assert split("/jm 下载 123") == ("download", ["123"])
+    assert split("/jm 打包 123") == ("zip", ["123"])
+    assert split("/jm 帮助") == ("help", [])
+    assert split("/jm 全彩") == ("search", ["全彩"])
+    assert split("/jm 123")[0] == "download"
+
+    pica_split = PicaMixin._split_pica_subcommand
+    assert pica_split("/pica 搜索 测试") == ("search", ["测试"])
+    assert pica_split("/pica 随便看看") == ("search", ["随便看看"])
+    assert pica_split("/pica 停止") == ("stop", [])
+    assert pica_split("/pica 6837ffb2a5420e3b6c80dc1c")[0] == "download"
+
+
+def test_pdf_cache_keys_are_platform_scoped(tmp_path: Path):
+    plugin = build_plugin(tmp_path)
+    jm_key = plugin._pdf_key("123456", (1, 2), 85, 0)
+    pica_key = plugin._pdf_key("pica_abc123", (1, 2), 85, 0)
+    assert jm_key != pica_key
+    assert "pica_" in pica_key
+    plugin.sent_albums_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin._mark_album_sent("pica_abc123")
+    assert "pica_abc123" in plugin._sent_albums
+    assert "123456" not in plugin._sent_albums
+
+
+def test_pica_token_reauth(tmp_path: Path):
+    import asyncio
+    import json
+
+    from pica.client import PicaClient
+
+    class _FakeResponse:
+        def __init__(self, status, text):
+            self.status = status
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def text(self):
+            return self._text
+
+    class _FakeSession:
+        closed = False
+
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url))
+            return _FakeResponse(*self.responses.pop(0))
+
+    client = PicaClient(account="u", password="p", token_file=tmp_path / "token.json")
+    client.token = "expired"
+    client._session = _FakeSession(
+        [
+            (401, json.dumps({"code": 401, "error": "1005", "message": "unauthorized"})),
+            (200, json.dumps({"code": 200, "data": {"token": "fresh-token"}})),
+            (200, json.dumps({"code": 200, "data": {"comics": {"docs": []}}})),
+        ]
+    )
+    data = asyncio.run(client.search("x"))
+    assert data == {"comics": {"docs": []}}
+    assert client.token == "fresh-token"
+    assert len(client._session.calls) == 3
+    assert client._session.calls[1][1].endswith("auth/sign-in")
+
+
 def main() -> int:
     import shutil
     import os
@@ -590,6 +851,18 @@ def main() -> int:
         test_cleanup_expired,
         test_progress_reporter_start,
         test_stop_without_job,
+        test_pica_signature_and_headers,
+        test_pica_image_url,
+        test_parse_chapter_spec,
+        test_select_pica_episodes,
+        test_parse_pica_tokens,
+        test_split_pica_subcommand,
+        test_pica_download_writes_zip,
+        test_alias_and_keyword_fallback,
+        test_cleanup_expired_pica_per_album,
+        test_cleanup_counts_pica_albums_not_container,
+        test_pdf_cache_keys_are_platform_scoped,
+        test_pica_token_reauth,
     ]
     for index, test in enumerate(tests):
         case_dir = base / f"{index:02d}_{test.__name__}"

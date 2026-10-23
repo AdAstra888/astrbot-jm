@@ -2,7 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-JMComic 下载插件 - 3.4.0
+JMComic & PicACG 下载插件 - 3.5.0
+
+3.5.0 主要变更（新增哔咔漫画）：
+- 新增 /pica 命令族（下载 / 章节 / 搜索 / 详情 / 排行榜 / 随机 / 收藏 / 停止）
+- 哔咔与 JM 共用并发闸门、PDF 缓存、清理策略和发送限制
+- 哔咔配置：pica_account、pica_password、pica_token、pica_proxy、pica_concurrency
+- 哔咔实现位于 pica/ 子包，登录后的 token 缓存在 cache/pica_token.json
 
 3.4.0 主要变更（随机推荐与更简洁的帮助）：
 - 新增 /jm rand，从榜单或搜索结果随机推荐，自动跳过已发过的本子
@@ -52,6 +58,14 @@ from astrbot.api.message_components import Image as MsgImage
 from astrbot.api.star import Context, Star, register
 
 try:
+    from .pica.plugin import PicaMixin
+except ImportError:  # 兼容以单文件方式加载的场景
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pica.plugin import PicaMixin
+
+try:
     import jmcomic  # noqa: F401  (供 create_option_by_file 等间接使用)
     from jmcomic import (
         DirRule,
@@ -92,7 +106,7 @@ except ImportError:  # pragma: no cover
     PDF_AVAILABLE = False
     logger.error("PDF 库未安装，请执行: pip install img2pdf Pillow")
 
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 BASE_DIR = Path(__file__).resolve().parent
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 _NATURAL_SPLIT = re.compile(r"(\d+)")
@@ -184,7 +198,7 @@ class _ProgressReporter:
 
 
 @register("jmcomic_downloader", "JMComic 下载", "禁漫下载插件（支持范围下载、图文详情、智能清理）", VERSION)
-class JmComicPlugin(Star):
+class JmComicPlugin(PicaMixin, Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
@@ -309,7 +323,8 @@ class JmComicPlugin(Star):
     def _mark_album_sent(self, album_id: str):
         """记录已发送的本子；超过 1000 条时按时间淘汰最旧的。"""
         album_id = str(album_id).strip()
-        if not album_id.isdigit():
+        # JM 的本子 ID 是纯数字；哔咔的是 24 位十六进制，统一加 pica_ 前缀隔离
+        if not re.fullmatch(r"(?:\d+|pica_[0-9a-f]{6,})", album_id, flags=re.IGNORECASE):
             return
         self._sent_albums[album_id] = time.time()
         if len(self._sent_albums) > 1000:
@@ -661,7 +676,10 @@ class JmComicPlugin(Star):
                         paths.append(str(target))
 
             with open(output_pdf, "wb") as stream:
-                img2pdf.convert(paths, outputstream=stream)
+                # img2pdf 的 *images 是可变参数，传列表会被当成单个对象而产出空 PDF
+                img2pdf.convert(*paths, outputstream=stream)
+            if output_pdf.stat().st_size < 200:
+                return False, f"PDF 内容异常（{output_pdf.stat().st_size} 字节）"
             return True, ""
         except Exception as exc:
             logger.error(f"PDF 生成失败: {exc}\n{traceback.format_exc()}")
@@ -1073,7 +1091,7 @@ class JmComicPlugin(Star):
         user_dir = self._user_base_dir(user_id)
         if not user_dir.is_dir():
             return
-        exclude_dirs = {"pdfs", "cache"}
+        exclude_dirs = {"pdfs", "cache", "pica"}
         try:
             album_dirs = [
                 path
@@ -1084,6 +1102,13 @@ class JmComicPlugin(Star):
             logger.error(f"读取用户下载目录失败 {user_dir}: {exc}")
             return
 
+        # 哔咔的本子放在 <用户>/pica/ 下，不能把整个 pica 目录当成一本算
+        pica_root = user_dir / "pica"
+        if pica_root.is_dir():
+            try:
+                album_dirs.extend(path for path in pica_root.iterdir() if path.is_dir())
+            except OSError as exc:
+                logger.warning(f"读取哔咔下载目录失败 {pica_root}: {exc}")
         album_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
         targets = list(album_dirs[self.max_albums:])
 
@@ -1129,6 +1154,20 @@ class JmComicPlugin(Star):
             for target in entries:
                 try:
                     if target.name == "cache":
+                        continue
+                    if target.name == "pica" and target.is_dir():
+                        # 哔咔按单本清理：每个本子目录单独看 mtime
+                        for album in target.iterdir():
+                            try:
+                                if album.stat().st_mtime >= cutoff:
+                                    continue
+                                if album.is_dir():
+                                    shutil.rmtree(album)
+                                else:
+                                    album.unlink()
+                                removed += 1
+                            except OSError as exc:
+                                logger.warning(f"清理过期哔咔文件失败 {album}: {exc}")
                         continue
                     if target.name == "pdfs" and target.is_dir():
                         for pdf in target.glob("*.pdf"):
@@ -1450,26 +1489,52 @@ class JmComicPlugin(Star):
     # ------------------------------------------------------------------
     _SUBCOMMANDS = {
         "download": "download",
+        "下载": "download",
+        "下": "download",
+        "dl": "download",
+        "get": "download",
         "pdf": "download",
         "zip": "zip",
+        "打包": "zip",
+        "压缩": "zip",
+        "包": "zip",
         "z": "zip",
         "search": "search",
+        "搜": "search",
+        "搜索": "search",
+        "找": "search",
+        "find": "search",
         "s": "search",
         "rank": "rank",
+        "排行": "rank",
+        "榜": "rank",
+        "榜单": "rank",
+        "top": "rank",
         "ranking": "rank",
         "r": "rank",
         "detail": "detail",
+        "详情": "detail",
+        "信息": "detail",
         "info": "detail",
         "d": "detail",
         "rand": "rand",
+        "roll": "rand",
+        "盲盒": "rand",
         "random": "rand",
         "随机": "rand",
         "推荐": "rand",
         "stop": "stop",
+        "停止": "stop",
+        "取消": "stop",
+        "停": "stop",
         "cancel": "stop",
         "clean": "clean",
+        "清理": "clean",
+        "清除": "clean",
         "clear": "clean",
         "help": "help",
+        "帮助": "help",
+        "说明": "help",
         "h": "help",
         "?": "help",
     }
@@ -1490,7 +1555,8 @@ class JmComicPlugin(Star):
             return sub, tokens[1:]
         if tokens[0].isdigit():
             return "download", tokens
-        return "help", tokens
+        # 既不是子命令也不是 ID，就当成搜索关键词
+        return "search", tokens
 
     @staticmethod
     def _parse_keyword_tokens(tokens: List[str]) -> Tuple[str, int]:
@@ -1633,24 +1699,25 @@ class JmComicPlugin(Star):
     @staticmethod
     def _help_text() -> str:
         return (
-            "【禁漫插件】最常用的三条：\n"
-            "/jm 123            下载本子 123，自动转成 PDF\n"
-            "/jm rand           随机推荐一本（发过的不会再发）\n"
-            "/jm s 关键词        搜索\n"
+            "【禁漫 / JMComic】按常用程度排：\n"
             "\n"
-            "下载再多一点：\n"
-            "/jm 123 1-5        只下第 1~5 章\n"
-            "/jm 123 --quality=60    文件太大时降低清晰度（默认 85）\n"
-            "/jm z 123          打包成 ZIP\n"
-            "/jm stop           停止正在下载的\n"
+            "/jm 123              下载本子 123，自动转 PDF\n"
+            "/jm rand             随机推荐一本（发过的跳过）\n"
+            "/jm 关键词            直接搜索，等于 /jm s\n"
+            "/jm 123 1-5          只下第 1~5 章\n"
             "\n"
-            "随便看看：\n"
-            "/jm r week         排行榜（week / month / day）\n"
-            "/jm d 123          只看详情，不下载\n"
+            "可选参数：\n"
+            "  --quality=60       清晰度 1-100，默认 85，越小文件越小\n"
+            "  --max-size=1600    图片最长边，0 = 不缩放\n"
+            "/jm z 123            打包成 ZIP\n"
+            "/jm stop             停止下载\n"
+            "/jm r week           排行榜：day / week / month\n"
+            "/jm d 123            只看详情，不下载\n"
+            "/jm clean            立即清理过期文件\n"
+            "/jm help             这条说明\n"
             "\n"
-            "其他：\n"
-            "/jm clean          马上清理过期文件\n"
-            "/jm help           这段说明"
+            "中文子命令也认：下载、搜索、排行、详情、随机、停止、清理、帮助。\n"
+            "哔咔漫画用 /pica，需先在配置里填 pica_account / pica_password。\n"
         )
 
     @filter.command("jm")
@@ -1701,6 +1768,16 @@ class JmComicPlugin(Star):
         for result in await self._accept_ranking(event, tokens):
             yield result
 
+    @filter.command("pica")
+    async def command_pica(self, event: AstrMessageEvent):
+        for result in await self._accept_pica_entry(event):
+            yield result
+
+    @filter.command("bika")
+    async def command_bika(self, event: AstrMessageEvent):
+        for result in await self._accept_pica_entry(event):
+            yield result
+
     async def terminate(self):
         tasks = list(self._background_tasks)
         for task in tasks:
@@ -1717,4 +1794,5 @@ class JmComicPlugin(Star):
         self._active_jobs.clear()
         self._cancel_requests.clear()
         self._album_locks.clear()
-        logger.info("禁漫插件已卸载")
+        await self._pica_terminate()
+        logger.info("禁漫/哔咔插件已卸载")

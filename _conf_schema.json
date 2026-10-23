@@ -8,7 +8,10 @@
     "description": "清理模式：count（按数量保留）或 after_send（发送完成后延迟删除）",
     "type": "string",
     "default": "count",
-    "options": ["count", "after_send"],
+    "options": [
+      "count",
+      "after_send"
+    ],
     "hint": "count：每个用户保留最多 max_albums 个本子；after_send：发送完成并等待缓冲时间后删除本次文件"
   },
   "max_albums": {
@@ -111,5 +114,53 @@
     "type": "string",
     "default": "",
     "hint": "可通过 YAML 配置代理、线程数和目录规则等行为；不存在时会自动回退为内置默认配置"
+  },
+  "pica_account": {
+    "description": "哔咔（PicACG）账号（邮箱或用户名）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则 /pica 命令不可用；与 pica_password 一起填写"
+  },
+  "pica_password": {
+    "description": "哔咔账号密码",
+    "type": "string",
+    "default": "",
+    "hint": "只在登录时使用，登录成功后会缓存 token 到 cache/pica_token.json"
+  },
+  "pica_token": {
+    "description": "哔咔 token（可选，手动填写可跳过登录）",
+    "type": "string",
+    "default": "",
+    "hint": "一般留空；账号密码登录失败时可从浏览器抓一个 token 填这里"
+  },
+  "pica_api_base": {
+    "description": "哔咔接口地址（一般不用改）",
+    "type": "string",
+    "default": "https://picaapi.picacomic.com/",
+    "hint": "如果用的是分流/镜像 App，填它实际请求的接口域名"
+  },
+  "pica_allow_http_fallback": {
+    "description": "图片下载允许降级到 HTTP",
+    "type": "bool",
+    "default": false,
+    "hint": "只有个别镜像站图片只支持 HTTP 时才需要打开；打开后图片明文传输"
+  },
+  "pica_proxy": {
+    "description": "哔咔请求使用的代理（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "例如 http://127.0.0.1:7890，留空表示直连"
+  },
+  "pica_verify_ssl": {
+    "description": "是否校验哔咔图片服务器的 SSL 证书",
+    "type": "bool",
+    "default": true,
+    "hint": "部分图床证书异常，下载失败可尝试关闭"
+  },
+  "pica_concurrency": {
+    "description": "哔咔单章图片同时下载数量",
+    "type": "int",
+    "default": 4,
+    "hint": "1~8，越大越快但越容易被限速"
   }
 }

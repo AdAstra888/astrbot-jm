@@ -2,3 +2,4 @@
 jmcomic>=2.7.0,<3.0.0
 img2pdf>=0.4.4,<0.7
 Pillow>=9.6,<13
+aiohttp>=3.9,<4

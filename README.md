@@ -1,4 +1,4 @@
-# AstrBot JMComic 下载搜索插件
+# AstrBot JMComic & PicACG 下载搜索插件
 
 [![AGPL-3.0 License](https://img.shields.io/github/license/suiseikat/astrbot_plugin_jmcomics)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
@@ -24,6 +24,21 @@ ps:这些都是ai写的，用dsh和codex轮流拷打完成的，有什么事不�
 
 旧命令 `/jmz`、`/jms`、`/jmr` 仍然可用，效果与对应子命令一致。
 
+哔咔漫画（PicACG）走另一组命令，和 JM 完全独立：
+
+- `/pica <本子ID>`：下载整本或指定章节（如 `1-5`、`1,3,5-10`），转 PDF 发送。
+- `/pica z <本子ID>`：打包 ZIP。
+- `/pica s <关键词> [页码]`：搜索。
+- `/pica d <本子ID>`：文字详情。
+- `/pica eps <本子ID> [页码]`：章节列表。
+- `/pica r [day|week|month]`：排行榜。
+- `/pica rand`：随机推荐（跳过已发过的）。
+- `/pica fav [页码]`：我的收藏。
+- `/pica stop`：停止当前用户的哔咔下载。
+- `/pica login`：检查登录状态。
+
+哔咔与 JM 共用并发闸门、PDF 缓存、发送大小限制和清理策略，所以两个平台不会互相拖慢。
+
 ## 安装
 
 进入 AstrBot 的插件目录并克隆仓库：
@@ -44,6 +59,8 @@ pip install -r astrbot_plugin_jmcomics/requirements.txt
 ## 使用
 
 所有操作都从 `/jm` 一个命令进入，也可以用旧命令。
+
+子命令支持中文：`下载`、`搜索`、`排行`、`详情`、`随机`、`停止`、`清理`、`帮助`，和英文写法等价。第一个词既不是子命令、也不像本子号时（例如 `/jm 全彩`），会直接当成搜索关键词。哔咔同理，`/pica 搜索`、`/pica 停止` 都能用。
 
 ### 下载 PDF
 
@@ -112,6 +129,26 @@ pip install -r astrbot_plugin_jmcomics/requirements.txt
 
 `/jm clean` 立即清理超过 `auto_cleanup_days` 天未使用的文件（未设置时按 7 天处理）。
 
+### 哔咔漫画
+
+先在插件配置里填 `pica_account` 和 `pica_password`，重启后发送 `/pica login` 确认能登录（token 会缓存到 `cache/pica_token.json`，之后不再重复登录）。
+
+```text
+/pica s 关键词              搜索，拿到 24 位本子 ID
+/pica <ID>                  下载整本
+/pica <ID> 1-5              只下第 1~5 章
+/pica eps <ID>              看章节列表，确认序号
+/pica stop                  停止
+```
+
+如果登录提示 `invalid email or password`，先确认这组账号能在官方网页/App 登录；哔咔的账号分服务器，第三方镜像站的账号无法在官方接口登录。
+
+很早的旧章节可能已下架或需要解锁，接口会直接报错。这类章节会被跳过，下载结束后单独提示哪些章节失败，不会影响其他章节。
+
+两种并发不是一回事：`max_concurrent` 限制**同时进行的下载任务数**（默认 1，两个平台共用这个闸门），`pica_concurrency` 限制**单章内同时下载的图片数**（默认 4）。任务排队时会提示“已加入队列”。
+
+关于凭据：`pica_password` 存在 AstrBot 的配置里，是明文的，别把 `data/config` 目录泄露出去；登录拿到的 token 缓存在 `cache/pica_token.json`，Linux/macOS 下会自动设成 `600` 权限。插件不会在日志或报错里打印密码。
+
 ## 配置
 
 在 AstrBot 管理面板的插件配置页修改：
@@ -135,6 +172,14 @@ pip install -r astrbot_plugin_jmcomics/requirements.txt
 | `allowed_groups` | string | 空 | 允许使用的群号，逗号或空格分隔；留空不限制，私聊始终可用。 |
 | `enable_jm_log` | bool | `false` | 是否显示 jmcomic 调试日志。 |
 | `option_file` | string | 空 | 自定义 jmcomic YAML 配置路径；不存在时回退到内置默认配置。 |
+| `pica_account` | string | 空 | 哔咔账号（邮箱或用户名），留空则 `/pica` 不可用。 |
+| `pica_password` | string | 空 | 哔咔密码，登录成功后会缓存 token。 |
+| `pica_token` | string | 空 | 可选，手动指定 token 可跳过登录。 |
+| `pica_api_base` | string | 官方地址 | 哔咔接口地址；用分流 App 时改成它实际请求的域名。 |
+| `pica_allow_http_fallback` | bool | `false` | 图片下载是否允许从 HTTPS 降级到 HTTP；只有镜像站强制 HTTP 时才开。 |
+| `pica_proxy` | string | 空 | 哔咔请求代理，例如 `http://127.0.0.1:7890`。 |
+| `pica_verify_ssl` | bool | `true` | 图床证书异常时可关闭。 |
+| `pica_concurrency` | int | `4` | 单章图片并发数，1~8。 |
 
 修改配置后请重启或重新加载插件。
 
@@ -216,6 +261,7 @@ astrbot_plugin_jmcomics/
 ├── tests/
 ├── _conf_schema.json
 ├── main.py
+├── pica/
 ├── metadata.yaml
 ├── requirements.txt
 └── README.md

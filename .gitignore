@@ -211,6 +211,13 @@ tests/.tmp*/
 .pytest_cache/
 .jm_pdf_*/
 .testdeps/
+# 哔咔本地联调凭据，绝不入库
+.pica_local.json
+# 用户在工作区留下的账号文件（含明文密码），绝不入库
+PicaWeb_*.txt
+*.secret
+
+.probe_*.py
 pip-build-tracker-*/
 pip-ephem-wheel-cache-*/
 pip-install-*/
