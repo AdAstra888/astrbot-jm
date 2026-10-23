@@ -343,6 +343,85 @@ def test_delete_refuses_outside(tmp_path: Path):
     assert not inside.exists()
 
 
+def test_rand_parsing_and_history(_tmp_path: Path):
+    split = plugin_module.JmComicPlugin._split_subcommand
+    assert split("/jm rand") == ("rand", [])
+    assert split("/jm random week") == ("rand", ["week"])
+    assert split("/jm 随机") == ("rand", [])
+    assert split("/jm 推荐 巨乳") == ("rand", ["巨乳"])
+
+    parse = plugin_module.JmComicPlugin._parse_rand_tokens
+    assert parse([]) == ("day", "")
+    assert parse(["week"]) == ("week", "")
+    assert parse(["本月"]) == ("month", "")
+    assert parse(["week", "巨乳"]) == ("week", "巨乳")
+    assert parse(["巨乳", "人妻"]) == ("day", "巨乳 人妻")
+    try:
+        parse(["x" * 41])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("超长关键词应报错")
+
+
+def test_sent_albums_bookkeeping(tmp_path: Path):
+    plugin = build_plugin(tmp_path)
+    plugin._mark_album_sent("123")
+    plugin._mark_album_sent("not-a-number")
+    assert "123" in plugin._sent_albums
+    assert "not-a-number" not in plugin._sent_albums
+
+    # 记录应当落盘，重建插件后仍能读到
+    reloaded = build_plugin(tmp_path)
+    assert "123" in reloaded._sent_albums
+
+    # 超过 1000 条时淘汰最旧的记录
+    plugin._sent_albums["123"] = 0.0  # 造一个最旧的记录
+    for index in range(1005):
+        plugin._sent_albums[str(10000 + index)] = float(index + 1)
+    plugin._mark_album_sent("999999")
+    assert len(plugin._sent_albums) == 1000
+    assert "123" not in plugin._sent_albums
+
+
+def test_do_rand_skips_sent(tmp_path: Path):
+    import asyncio as _asyncio
+    import types as _types
+
+    plugin = build_plugin(tmp_path)
+    plugin._mark_album_sent("111")
+
+    class _Client:
+        @staticmethod
+        def day_ranking(page=1):
+            return _types.SimpleNamespace(
+                content=[("111", "已发过的"), ("222", "新的")], total=2, page_count=1
+            )
+
+    async def _get_option(user_id=None):
+        client = _Client()
+        return _types.SimpleNamespace(build_jm_client=lambda: client)
+
+    sent_texts = []
+    details = []
+
+    async def _safe_send(event, text):
+        sent_texts.append(text)
+
+    async def _do_detail(event, album_id):
+        details.append(album_id)
+
+    plugin._get_option = _get_option
+    plugin._safe_send = _safe_send
+    plugin._do_detail = _do_detail
+
+    _asyncio.run(plugin._do_rand(_FakeEvent(), "day", ""))
+
+    assert details == ["222"], details
+    assert "222" in plugin._sent_albums
+    assert "111" not in sent_texts
+
+
 def test_split_subcommand(_tmp_path: Path):
     split = plugin_module.JmComicPlugin._split_subcommand
     assert split("/jm 123") == ("download", ["123"])
@@ -505,6 +584,9 @@ def main() -> int:
         test_write_zip,
         test_delete_refuses_outside,
         test_split_subcommand,
+        test_rand_parsing_and_history,
+        test_do_rand_skips_sent,
+        test_sent_albums_bookkeeping,
         test_cleanup_expired,
         test_progress_reporter_start,
         test_stop_without_job,

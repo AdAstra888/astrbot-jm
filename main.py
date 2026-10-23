@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-JMComic 下载插件 - 3.3.0
+JMComic 下载插件 - 3.4.0
+
+3.4.0 主要变更（随机推荐与更简洁的帮助）：
+- 新增 /jm rand，从榜单或搜索结果随机推荐，自动跳过已发过的本子
+- 已发记录保存在下载目录的 sent_albums.json，最多保留 1000 条
+- /jm help 按使用频率重排，只保留最常用的命令
 
 3.3.0 主要变更（进度/停止/定时清理/操作简化）：
 - 下载过程按章节/页数推送进度消息（可配置开关与最小间隔）
@@ -25,7 +30,9 @@ JMComic 下载插件 - 3.3.0
 
 import asyncio
 import inspect
+import json
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -85,7 +92,7 @@ except ImportError:  # pragma: no cover
     PDF_AVAILABLE = False
     logger.error("PDF 库未安装，请执行: pip install img2pdf Pillow")
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 _NATURAL_SPLIT = re.compile(r"(\d+)")
@@ -219,6 +226,8 @@ class JmComicPlugin(Star):
         self.progress_updates = bool(self.config.get("progress_updates", True))
         self.progress_interval = self._config_int("progress_interval", 8, 3)
         self.auto_cleanup_days = self._config_int("auto_cleanup_days", 0, 0)
+        self.sent_albums_path = self.global_base_dir / "sent_albums.json"
+        self._sent_albums: Dict[str, float] = self._load_sent_albums()
 
         if not self.config.get("enable_jm_log", False):
             JmModuleConfig.disable_jm_log()
@@ -265,6 +274,50 @@ class JmComicPlugin(Star):
         if not isinstance(raw, (list, tuple, set)):
             return set()
         return {str(item).strip() for item in raw if str(item).strip()}
+
+    def _load_sent_albums(self) -> Dict[str, float]:
+        """读取「已经发过的本子」记录，用于随机推荐去重。"""
+        try:
+            if not self.sent_albums_path.is_file():
+                return {}
+            data = json.loads(self.sent_albums_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(f"读取已发送记录失败，将重新开始记录: {exc}")
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        result: Dict[str, float] = {}
+        for key, value in data.items():
+            key = str(key)
+            if not key.isdigit():
+                continue
+            try:
+                result[key] = float(value)
+            except (TypeError, ValueError):
+                result[key] = 0.0
+        return result
+
+    def _save_sent_albums(self):
+        try:
+            payload = json.dumps(self._sent_albums, ensure_ascii=False)
+            temp_path = self.sent_albums_path.with_name(self.sent_albums_path.name + ".part")
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, self.sent_albums_path)
+        except OSError as exc:
+            logger.warning(f"保存已发送记录失败: {exc}")
+
+    def _mark_album_sent(self, album_id: str):
+        """记录已发送的本子；超过 1000 条时按时间淘汰最旧的。"""
+        album_id = str(album_id).strip()
+        if not album_id.isdigit():
+            return
+        self._sent_albums[album_id] = time.time()
+        if len(self._sent_albums) > 1000:
+            overflow = len(self._sent_albums) - 1000
+            oldest = sorted(self._sent_albums.items(), key=lambda item: item[1])[:overflow]
+            for key, _ in oldest:
+                self._sent_albums.pop(key, None)
+        self._save_sent_albums()
 
     def _start_task(self, async_func, *args):
         try:
@@ -785,6 +838,7 @@ class JmComicPlugin(Star):
                 cached, cacheable = self._pdf_output_path(user_id, album_id, chapter_range, quality, max_size)
                 if cacheable and cached.exists() and cached.stat().st_size > 0:
                     await self._send_file(event, cached, f"本子 {album_id} 下载完成（缓存命中，质量={quality}）：")
+                    self._mark_album_sent(album_id)
                     return
 
             free_mb = self._free_space_mb()
@@ -810,6 +864,7 @@ class JmComicPlugin(Star):
                         await self._send_file(
                             event, cached, f"本子 {album_id} 下载完成（缓存命中，质量={quality}）："
                         )
+                        self._mark_album_sent(album_id)
                         return
 
                 async with self._get_sem():
@@ -929,6 +984,7 @@ class JmComicPlugin(Star):
             if cancel_event.is_set():
                 raise _JobCancelled()
             if await self._send_file(event, zip_path, f"本子 {album_id} 打包完成（{count} 张图片）："):
+                self._mark_album_sent(album_id)
                 cleanup_targets.append(zip_path)
                 if album_root:
                     cleanup_targets.append(album_root)
@@ -978,6 +1034,7 @@ class JmComicPlugin(Star):
         if cancel_event.is_set():
             raise _JobCancelled()
         if await self._send_file(event, pdf_path, caption):
+            self._mark_album_sent(album_id)
             if not cacheable:
                 cleanup_targets.append(pdf_path)
             cleanup_targets.extend(self._cleanup_album_targets(album_root, dirs, user_dir))
@@ -1202,6 +1259,92 @@ class JmComicPlugin(Star):
             await self._safe_send(event, f"获取详情失败: {exc}")
 
     # ------------------------------------------------------------------
+    # 随机推荐
+    # ------------------------------------------------------------------
+    _RAND_PERIODS = {
+        "day": "day",
+        "today": "day",
+        "日": "day",
+        "今日": "day",
+        "week": "week",
+        "周": "week",
+        "本周": "week",
+        "这周": "week",
+        "month": "month",
+        "月": "month",
+        "本月": "month",
+        "这月": "month",
+    }
+    _RAND_LABELS = {"day": "今日榜", "week": "本周榜", "month": "本月榜"}
+
+    @classmethod
+    def _parse_rand_tokens(cls, tokens: List[str]) -> Tuple[str, str]:
+        period = "day"
+        rest = list(tokens)
+        if rest:
+            key = rest[0].strip().lower()
+            if key in cls._RAND_PERIODS:
+                period = cls._RAND_PERIODS[key]
+                rest = rest[1:]
+        keyword = " ".join(rest).strip()
+        if len(keyword) > 40:
+            raise ValueError("关键词太长了，控制在 40 个字以内")
+        return period, keyword
+
+    async def _do_rand(self, event: AstrMessageEvent, period: str, keyword: str):
+        """从榜单（或搜索结果）随机挑一本没发过的，然后发详情。"""
+        try:
+            option = await self._get_option(event.get_sender_id())
+            if option is None:
+                await self._safe_send(event, "无法创建下载配置")
+                return
+            client = option.build_jm_client()
+            picked: Optional[str] = None
+            for _ in range(3):
+                page = random.randint(1, 5)
+                if keyword:
+                    result = await self._safe_call_with_timeout(
+                        client.search,
+                        60,
+                        search_query=keyword,
+                        page=page,
+                        main_tag=0,
+                        order_by=JmMagicConstants.ORDER_BY_LATEST,
+                        time=JmMagicConstants.TIME_ALL,
+                        category=JmMagicConstants.CATEGORY_ALL,
+                        sub_category=None,
+                    )
+                elif period == "month":
+                    result = await self._safe_call_with_timeout(client.month_ranking, 60, page=page)
+                elif period == "week":
+                    result = await self._safe_call_with_timeout(client.week_ranking, 60, page=page)
+                else:
+                    result = await self._safe_call_with_timeout(client.day_ranking, 60, page=page)
+                content = result.content if hasattr(result, "content") else list(result or [])
+                fresh = [
+                    str(item[0])
+                    for item in content
+                    if str(item[0]).isdigit() and str(item[0]) not in self._sent_albums
+                ]
+                if fresh:
+                    picked = random.choice(fresh)
+                    break
+            if picked is None:
+                await self._safe_send(
+                    event, "这批都推荐过了，等会儿再试；也可以换个关键词：/jm rand 关键词"
+                )
+                return
+            label = f"「{keyword}」" if keyword else self._RAND_LABELS.get(period, "今日榜")
+            await self._safe_send(event, f"随机推荐（{label}）：本子 {picked}，详情如下")
+            await self._do_detail(event, picked)
+            self._mark_album_sent(picked)
+        except (asyncio.TimeoutError, TimeoutError):
+            await self._safe_send(event, "获取随机推荐超时，请稍后重试")
+        except Exception as exc:
+            logger.error(traceback.format_exc())
+            await self._safe_send(event, f"随机推荐失败: {exc}")
+
+    # ------------------------------------------------------------------
     # 定期维护
     # ------------------------------------------------------------------
     async def _maintenance_loop(self):
@@ -1318,6 +1461,10 @@ class JmComicPlugin(Star):
         "detail": "detail",
         "info": "detail",
         "d": "detail",
+        "rand": "rand",
+        "random": "rand",
+        "随机": "rand",
+        "推荐": "rand",
         "stop": "stop",
         "cancel": "stop",
         "clean": "clean",
@@ -1443,6 +1590,17 @@ class JmComicPlugin(Star):
         await self._do_detail(event, album_id)
         return []
 
+    async def _accept_rand(self, event: AstrMessageEvent, args: List[str]):
+        denied = self._check_access(event)
+        if denied:
+            return [event.plain_result(denied)]
+        try:
+            period, keyword = self._parse_rand_tokens(args)
+        except ValueError as exc:
+            return [event.plain_result(str(exc))]
+        self._start_task(self._do_rand, event, period, keyword)
+        return []
+
     async def _accept_stop(self, event: AstrMessageEvent, args: List[str]):
         user_key = self._safe_user_dir(event.get_sender_id())
         job = self._active_jobs.get(user_key)
@@ -1475,18 +1633,24 @@ class JmComicPlugin(Star):
     @staticmethod
     def _help_text() -> str:
         return (
-            "【禁漫插件】直接发命令，最常用：\n"
-            "/jm 123                     下载本子 123 并转 PDF\n"
-            "/jm 123 1-5                 只下载第 1~5 章\n"
-            "/jm 123 --quality=70 --max-size=1600   体积太大时降清晰度\n"
-            "/jm z 123                   下载并打包 ZIP\n"
-            "/jm s 关键词 2              搜索（第 2 页）\n"
-            "/jm r week                  排行榜\n"
-            "/jm d 123                   查看详情\n"
-            "/jm stop                    停止当前下载\n"
-            "/jm clean                   立即清理过期文件\n"
-            "/jm help                    本帮助\n"
-            "旧命令 /jmz /jms /jmr 仍然可用。"
+            "【禁漫插件】最常用的三条：\n"
+            "/jm 123            下载本子 123，自动转成 PDF\n"
+            "/jm rand           随机推荐一本（发过的不会再发）\n"
+            "/jm s 关键词        搜索\n"
+            "\n"
+            "下载再多一点：\n"
+            "/jm 123 1-5        只下第 1~5 章\n"
+            "/jm 123 --quality=60    文件太大时降低清晰度（默认 85）\n"
+            "/jm z 123          打包成 ZIP\n"
+            "/jm stop           停止正在下载的\n"
+            "\n"
+            "随便看看：\n"
+            "/jm r week         排行榜（week / month / day）\n"
+            "/jm d 123          只看详情，不下载\n"
+            "\n"
+            "其他：\n"
+            "/jm clean          马上清理过期文件\n"
+            "/jm help           这段说明"
         )
 
     @filter.command("jm")
@@ -1502,6 +1666,8 @@ class JmComicPlugin(Star):
             results = await self._accept_ranking(event, args)
         elif sub == "detail":
             results = await self._accept_detail(event, args)
+        elif sub == "rand":
+            results = await self._accept_rand(event, args)
         elif sub == "stop":
             results = await self._accept_stop(event, args)
         elif sub == "clean":

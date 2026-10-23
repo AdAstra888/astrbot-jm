@@ -8,6 +8,7 @@ ps:这些都是ai写的，用dsh和codex轮流拷打完成的，有什么事不�
 ## 功能
 
 - `/jm <本子号>`：下载整本或指定章节，转换为 PDF 后发送。
+- `/jm rand [week|month|day] [关键词]`：随机推荐一本，自动跳过已经发过的本子。
 - `/jm z <本子号>`：下载整本或指定章节，打包为 ZIP 后发送。
 - `/jm s <关键词>`：按关键词搜索，关键词可以带空格。
 - `/jm r [week|day|month]`：查看月榜、周榜或日榜。
@@ -29,7 +30,7 @@ ps:这些都是ai写的，用dsh和codex轮流拷打完成的，有什么事不�
 
 ```bash
 cd /path/to/AstrBot/data/plugins
-git clone https://github.com/suiseikat/astrbot_plugin_jmcomics.git
+git clone https://github.com/AdAstra888/astrbot-jm.git
 ```
 
 随后安装依赖并重启 AstrBot：
@@ -65,6 +66,17 @@ pip install -r astrbot_plugin_jmcomics/requirements.txt
 ```text
 /jm z <本子号> [范围]
 ```
+
+### 随机推荐
+
+```text
+/jm rand
+/jm rand week
+/jm rand month
+/jm rand 巨乳
+```
+
+不写参数时从今日榜随机取一本；也可以指定周榜、月榜，或按关键词从搜索结果里随机取。发过的本子会记录在下载目录的 `sent_albums.json` 里，随机时会自动跳过，最多保留最近 1000 条。
 
 ### 搜索与排行榜
 
