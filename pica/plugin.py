@@ -83,6 +83,10 @@ _PICA_SUBCOMMANDS = {
     "取消": "stop",
     "cancel": "stop",
     "停止": "stop",
+    "clean": "clean",
+    "clear": "clean",
+    "清理": "clean",
+    "清除": "clean",
     "login": "login",
     "状态": "login",
     "检查": "login",
@@ -553,6 +557,58 @@ class PicaMixin:
     # ------------------------------------------------------------------
     # 查询命令
     # ------------------------------------------------------------------
+    @staticmethod
+    def _pica_docs(payload: Any) -> List[Dict[str, Any]]:
+        """兼容接口的三种返回形状：{comics:{docs:[]}} / {comics:[...]} / [...]。"""
+        if isinstance(payload, list):
+            return [doc for doc in payload if isinstance(doc, dict)]
+        if not isinstance(payload, dict):
+            return []
+        comics = payload.get("comics")
+        if isinstance(comics, list):
+            return [doc for doc in comics if isinstance(doc, dict)]
+        if isinstance(comics, dict):
+            return [doc for doc in (comics.get("docs") or []) if isinstance(doc, dict)]
+        docs = payload.get("docs")
+        if isinstance(docs, list):
+            return [doc for doc in docs if isinstance(doc, dict)]
+        return []
+
+    @staticmethod
+    def _pica_total(payload: Any) -> Any:
+        if isinstance(payload, dict):
+            comics = payload.get("comics")
+            if isinstance(comics, dict):
+                return comics.get("total", "?")
+            if isinstance(payload.get("total"), int):
+                return payload["total"]
+        return "?"
+
+    @staticmethod
+    def _pica_categories(comic: Dict[str, Any]) -> str:
+        """categories 可能是字符串数组，也可能是对象数组，两种都要兼容。"""
+        names: List[str] = []
+        for item in comic.get("categories") or []:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+            else:
+                name = str(item or "").strip()
+            if name:
+                names.append(name)
+        return "/".join(names)
+
+    @staticmethod
+    def _pica_comic_line(index: int, doc: Dict[str, Any]) -> str:
+        title = str(doc.get("title") or "无标题")
+        parts = [f"{index}. {title}", f"[{doc.get('_id')}]"]
+        author = str(doc.get("author") or "").strip()
+        if author:
+            parts.append(author)
+        likes = doc.get("likesCount")
+        if isinstance(likes, int):
+            parts.append(f"{likes}赞")
+        return "  ".join(parts)
+
     async def _do_pica_search(self, event: AstrMessageEvent, keyword: str, page: int):
         client = self._get_pica_client()
         if client is None:
@@ -561,16 +617,12 @@ class PicaMixin:
             data = await self._pica_call(client.search, keyword, page, timeout=60)
         except Exception as exc:
             return await self._safe_send(event, f"哔咔搜索失败: {exc}")
-        comics = data.get("comics") or {}
-        docs = [doc for doc in (comics.get("docs") or []) if isinstance(doc, dict)]
+        docs = self._pica_docs(data)
         if not docs:
             return await self._safe_send(event, f"哔咔没有搜到「{keyword}」")
-        lines = [f"哔咔搜索「{keyword}」第 {page} 页（共 {comics.get('total', '?')} 本）："]
-        for index, doc in enumerate(docs[:10], 1):
-            lines.append(
-                f"{index}. {doc.get('title')}  [{doc.get('_id')}]  "
-                f"{doc.get('epsCount', '?')}章 {doc.get('pagesCount', '?')}页"
-            )
+        total = self._pica_total(data)
+        lines = [f"哔咔搜索「{keyword}」第 {page} 页（共 {total} 本）："]
+        lines.extend(self._pica_comic_line(index, doc) for index, doc in enumerate(docs[:10], 1))
         lines.append("发送 /pica <ID> 开始下载")
         await self._safe_send(event, "\n".join(lines))
 
@@ -584,19 +636,41 @@ class PicaMixin:
             return await self._safe_send(event, f"获取哔咔详情失败: {exc}")
         if not comic:
             return await self._safe_send(event, f"没有找到哔咔本子 {comic_id}")
-        categories = "/".join(
-            str(item.get("name")) for item in (comic.get("categories") or []) if isinstance(item, dict)
-        )
         lines = [
             f"哔咔《{comic.get('title')}》",
             f"ID: {comic_id}",
             f"作者: {comic.get('author') or '未知'}",
             f"章节: {comic.get('epsCount', '?')}  页数: {comic.get('pagesCount', '?')}",
             f"喜欢: {comic.get('likesCount', '?')}  观看: {comic.get('viewsCount', '?')}",
-            f"分类: {categories or '未分类'}",
-            f"下载: /pica {comic_id}    仅打包: /pica z {comic_id}",
+            f"分类: {self._pica_categories(comic) or '未分类'}",
         ]
+        tags = [str(tag).strip() for tag in (comic.get("tags") or []) if str(tag).strip()]
+        if tags:
+            lines.append("标签: " + "、".join(tags[:12]))
+        if comic.get("description"):
+            lines.append("简介: " + str(comic["description"]).strip()[:120])
+        lines.append(f"下载: /pica {comic_id}    仅打包: /pica z {comic_id}")
         await self._safe_send(event, "\n".join(lines))
+        await self._send_pica_cover(event, client, comic_id, comic)
+
+    async def _send_pica_cover(self, event, client, comic_id: str, comic: Dict[str, Any]):
+        url = client.thumb_url(comic)
+        if not url:
+            return
+        try:
+            from astrbot.api.message_components import Image as MsgImage, Plain as MsgPlain
+        except ImportError:  # pragma: no cover
+            return
+        target = Path(self.cover_dir) / f"pica_{comic_id}.jpg"
+        try:
+            await self._pica_call(client.download_image, url, target, timeout=45)
+        except Exception as exc:  # 封面只是锦上添花，失败不影响主流程
+            logger.warning("哔咔封面下载失败 %s: %s", comic_id, exc)
+            return
+        try:
+            await event.send(event.chain_result([MsgImage.fromFileSystem(str(target)), MsgPlain("")]))
+        except Exception as exc:  # pragma: no cover
+            logger.warning("哔咔封面发送失败 %s: %s", comic_id, exc)
 
     async def _do_pica_episodes(self, event: AstrMessageEvent, comic_id: str, page: int = 1):
         client = self._get_pica_client()
@@ -631,16 +705,11 @@ class PicaMixin:
             )
         except Exception as exc:
             return await self._safe_send(event, f"获取哔咔排行榜失败: {exc}")
-        docs = [
-            doc
-            for doc in ((data.get("comics") or {}).get("docs") or [])
-            if isinstance(doc, dict)
-        ]
+        docs = self._pica_docs(data)
         if not docs:
             return await self._safe_send(event, "哔咔排行榜暂时没有数据")
         lines = [f"哔咔排行榜（{rank_type}）："]
-        for index, doc in enumerate(docs[:10], 1):
-            lines.append(f"{index}. {doc.get('title')}  [{doc.get('_id')}]")
+        lines.extend(self._pica_comic_line(index, doc) for index, doc in enumerate(docs[:10], 1))
         lines.append("发送 /pica <ID> 开始下载")
         await self._safe_send(event, "\n".join(lines))
 
@@ -652,46 +721,51 @@ class PicaMixin:
             data = await self._pica_call(client.favorites, page, timeout=60)
         except Exception as exc:
             return await self._safe_send(event, f"获取收藏夹失败: {exc}")
-        docs = [
-            doc
-            for doc in ((data.get("comics") or {}).get("docs") or [])
-            if isinstance(doc, dict)
-        ]
+        docs = self._pica_docs(data)
         if not docs:
             return await self._safe_send(event, f"哔咔收藏夹第 {page} 页是空的")
-        lines = [f"哔咔收藏夹第 {page} 页（共 {data.get('total', '?')} 本）："]
-        for index, doc in enumerate(docs[:10], 1):
-            lines.append(f"{index}. {doc.get('title')}  [{doc.get('_id')}]")
+        lines = [f"哔咔收藏夹第 {page} 页（共 {self._pica_total(data)} 本）："]
+        lines.extend(self._pica_comic_line(index, doc) for index, doc in enumerate(docs[:10], 1))
         lines.append("发送 /pica <ID> 开始下载")
         await self._safe_send(event, "\n".join(lines))
 
-    async def _do_pica_rand(self, event: AstrMessageEvent):
+    async def _do_pica_rand(self, event: AstrMessageEvent, keyword: str = "", period: str = "day"):
         client = self._get_pica_client()
         if client is None:
             return await self._safe_send(event, "哔咔支持未启用")
-        for _ in range(3):
+        pool: List[Dict[str, Any]] = []
+        if keyword:
             try:
-                data = await self._pica_call(client.leaderboard, "H24", "VC", timeout=40)
+                data = await self._pica_call(client.search, keyword, 1, timeout=60)
+                pool = self._pica_docs(data)
             except Exception as exc:
-                return await self._safe_send(event, f"获取哔咔推荐失败: {exc}")
-            docs = [
-                doc
-                for doc in ((data.get("comics") or {}).get("docs") or [])
-                if isinstance(doc, dict) and doc.get("_id")
-            ]
-            docs = [
-                doc for doc in docs if f"pica_{doc['_id']}" not in self._sent_albums
-            ]
-            if docs:
-                pick = random.choice(docs)
-                await self._safe_send(
-                    event,
-                    f"哔咔随机推荐：《{pick.get('title')}》 {pick.get('_id')}，详情如下",
-                )
-                await self._do_pica_detail(event, str(pick["_id"]))
-                self._mark_album_sent(f"pica_{pick['_id']}")
-                return
-        await self._safe_send(event, "哔咔榜单里的本子都推荐过了，明天再看吧")
+                return await self._safe_send(event, f"哔咔搜索失败: {exc}")
+        else:
+            mapping = {"day": "H24", "week": "D7", "month": "D30"}
+            for _ in range(2):
+                try:
+                    data = await self._pica_call(
+                        client.leaderboard, mapping.get(period, "H24"), "VC", timeout=40
+                    )
+                except Exception as exc:
+                    return await self._safe_send(event, f"获取哔咔推荐失败: {exc}")
+                pool = self._pica_docs(data)
+                if pool:
+                    break
+        candidates = [
+            doc for doc in pool if doc.get("_id") and f"pica_{doc['_id']}" not in self._sent_albums
+        ]
+        if not candidates:
+            return await self._safe_send(
+                event, "哔咔这批都推荐过了，换个关键词或明天再看吧"
+            )
+        pick = random.choice(candidates)
+        await self._safe_send(
+            event,
+            f"哔咔随机推荐：《{pick.get('title')}》 {pick.get('_id')}，详情如下",
+        )
+        await self._do_pica_detail(event, str(pick["_id"]))
+        self._mark_album_sent(f"pica_{pick['_id']}")
 
     async def _do_pica_login(self, event: AstrMessageEvent):
         if not self._pica_configured():
@@ -699,6 +773,8 @@ class PicaMixin:
                 event, "哔咔未配置账号：请在插件配置里填 pica_account / pica_password"
             )
         client = self._get_pica_client()
+        if client is None:
+            return await self._safe_send(event, "哔咔支持未启用：缺少 aiohttp 依赖")
         try:
             token = await self._pica_call(client.ensure_token, timeout=45)
             if not token:
@@ -706,7 +782,9 @@ class PicaMixin:
         except Exception as exc:
             return await self._safe_send(event, f"哔咔登录失败: {exc}")
         await self._safe_send(
-            event, f"哔咔登录正常（账号 {self._pica_str('pica_account') or 'token 登录'}）"
+            event,
+            f"哔咔登录正常（{self._pica_str('pica_account') or 'token 登录'}，"
+            f"token 长度 {len(token)}）",
         )
 
     # ------------------------------------------------------------------
@@ -727,6 +805,8 @@ class PicaMixin:
             return [event.plain_result(denied)]
         if sub == "stop":
             return await self._accept_stop(event, args)
+        if sub == "clean":
+            return await self._accept_clean(event, args)
         if sub in ("download", "zip"):
             return await self._accept_pica_download(event, args, pack=(sub == "zip"))
         if sub == "search":
@@ -764,8 +844,22 @@ class PicaMixin:
             self._start_task(self._do_pica_ranking, event, rank_type)
             return [event.plain_result(f"正在获取哔咔{rank_type}排行榜…")]
         if sub == "rand":
-            self._start_task(self._do_pica_rand, event)
-            return [event.plain_result("正在挑一本哔咔…")]
+            keyword = ""
+            period = "day"
+            for token in args:
+                lowered = token.lower()
+                if lowered in ("day", "today", "日", "今日"):
+                    period = "day"
+                elif lowered in ("week", "周", "本周"):
+                    period = "week"
+                elif lowered in ("month", "月", "本月"):
+                    period = "month"
+                else:
+                    keyword = (keyword + " " + token).strip()
+            self._start_task(self._do_pica_rand, event, keyword, period)
+            if keyword:
+                return [event.plain_result(f"正在从「{keyword}」里随机挑一本哔咔…")]
+            return [event.plain_result(f"正在挑一本哔咔（{period}榜）…")]
         if sub == "fav":
             page = int(args[0]) if args and args[0].isdigit() else 1
             self._start_task(self._do_pica_favorites, event, page)
@@ -814,22 +908,24 @@ class PicaMixin:
     @staticmethod
     def _pica_help_text() -> str:
         return (
-            "【哔咔 PicACG】\n"
+            "【哔咔 PicACG】按常用程度排：\n"
             "\n"
             "/pica 24位本子ID      下载整本，自动转 PDF\n"
             "/pica s 关键词        搜索（也可以直接 /pica 关键词）\n"
-            "/pica rand            随机推荐\n"
+            "/pica rand            随机推荐一本\n"
             "/pica <ID> 1-5        只下第 1~5 章\n"
             "\n"
             "/pica z <ID>          打包成 ZIP\n"
-            "/pica d <ID>          只看详情\n"
+            "/pica d <ID>          只看详情（带封面）\n"
             "/pica eps <ID>        章节列表\n"
             "/pica r week          排行榜：day / week / month\n"
+            "/pica rand 关键词      从搜索结果里随机挑一本\n"
             "/pica fav             我的收藏\n"
             "/pica stop            停止下载\n"
+            "/pica clean           立即清理过期文件\n"
             "/pica login           检查登录状态\n"
             "/pica help            这条说明\n"
             "\n"
-            "中文子命令也认：下载、搜索、排行、详情、章节、收藏、随机、停止、登录、帮助。\n"
+            "中文子命令也认：下载、搜索、排行、详情、章节、收藏、随机、停止、清理、登录、帮助。\n"
             "JM 的命令仍然用 /jm，互不影响。\n"
         )

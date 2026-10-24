@@ -822,6 +822,91 @@ def test_pica_token_reauth(tmp_path: Path):
     assert client._session.calls[1][1].endswith("auth/sign-in")
 
 
+def test_pica_docs_shapes(tmp_path: Path):
+    plugin = build_plugin(tmp_path)
+    docs = [{"_id": "a"}, {"_id": "b"}]
+    assert plugin._pica_docs({"comics": {"docs": docs}}) == docs
+    assert plugin._pica_docs({"comics": docs}) == docs  # 排行榜真实形状
+    assert plugin._pica_docs(docs) == docs
+    assert plugin._pica_docs({"docs": docs}) == docs
+    assert plugin._pica_docs(None) == []
+    assert plugin._pica_docs({"comics": {"docs": [1, "x"]}}) == []
+
+
+def test_pica_categories_and_lines(tmp_path: Path):
+    plugin = build_plugin(tmp_path)
+    assert plugin._pica_categories({"categories": ["全彩", "長篇"]}) == "全彩/長篇"
+    assert plugin._pica_categories({"categories": [{"name": "短篇"}]}) == "短篇"
+    assert plugin._pica_categories({}) == ""
+    line = plugin._pica_comic_line(1, {"title": "标题", "_id": "abc", "author": "作者", "likesCount": 3})
+    assert line.startswith("1. 标题  [abc]")
+    assert "作者" in line and "3赞" in line
+
+
+def test_pica_ranking_accepts_list_payload(tmp_path: Path):
+    import asyncio
+
+    plugin = build_plugin(tmp_path)
+
+    class _FakeClient:
+        async def leaderboard(self, tt, ct):
+            # 真实接口：comics 是数组而不是 {docs: []}
+            return {"comics": [{"_id": "aaa111", "title": "榜单本子", "likesCount": 9}]}
+
+        def thumb_url(self, comic):
+            return ""
+
+    plugin._get_pica_client = lambda: _FakeClient()
+    event = _FakeEvent()
+    asyncio.run(plugin._do_pica_ranking(event, "week"))
+    text = "\n".join(str(item) for item in event.sent)
+    assert "榜单本子" in text and "aaa111" in text
+
+
+def test_pica_login_reports_token(tmp_path: Path):
+    import asyncio
+
+    plugin = build_plugin(tmp_path)
+    plugin.config["pica_account"] = "user1"
+    plugin.config["pica_password"] = "pass1"
+
+    class _FakeClient:
+        async def ensure_token(self):
+            return "t" * 348
+
+    plugin._get_pica_client = lambda: _FakeClient()
+    event = _FakeEvent()
+    asyncio.run(plugin._do_pica_login(event))
+    text = "\n".join(str(item) for item in event.sent)
+    assert "登录正常" in text and "348" in text
+
+
+def test_pica_rand_with_keyword(tmp_path: Path):
+    import asyncio
+
+    plugin = build_plugin(tmp_path)
+
+    class _FakeClient:
+        async def search(self, keyword, page, sort="dd"):
+            return {"comics": {"docs": [{"_id": "abcdef0123456789abcdef01", "title": "随机的本子"}]}}
+
+        async def comic(self, comic_id):
+            return {"title": "随机的本子", "epsCount": 1, "pagesCount": 2}
+
+        async def leaderboard(self, tt, ct):
+            return {"comics": []}
+
+        def thumb_url(self, comic):
+            return ""
+
+    plugin._get_pica_client = lambda: _FakeClient()
+    event = _FakeEvent()
+    asyncio.run(plugin._do_pica_rand(event, "关键词", "day"))
+    text = "\n".join(str(item) for item in event.sent)
+    assert "随机推荐" in text and "abcdef0123456789abcdef01" in text
+    assert "pica_abcdef0123456789abcdef01" in plugin._sent_albums
+
+
 def main() -> int:
     import shutil
     import os
@@ -863,6 +948,11 @@ def main() -> int:
         test_cleanup_counts_pica_albums_not_container,
         test_pdf_cache_keys_are_platform_scoped,
         test_pica_token_reauth,
+        test_pica_docs_shapes,
+        test_pica_categories_and_lines,
+        test_pica_ranking_accepts_list_payload,
+        test_pica_login_reports_token,
+        test_pica_rand_with_keyword,
     ]
     for index, test in enumerate(tests):
         case_dir = base / f"{index:02d}_{test.__name__}"

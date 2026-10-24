@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-JMComic & PicACG 下载插件 - 3.5.0
+JMComic & PicACG 下载插件 - 3.5.1
 
 3.5.0 主要变更（新增哔咔漫画）：
 - 新增 /pica 命令族（下载 / 章节 / 搜索 / 详情 / 排行榜 / 随机 / 收藏 / 停止）
@@ -106,7 +106,7 @@ except ImportError:  # pragma: no cover
     PDF_AVAILABLE = False
     logger.error("PDF 库未安装，请执行: pip install img2pdf Pillow")
 
-VERSION = "3.5.0"
+VERSION = "3.5.1"
 BASE_DIR = Path(__file__).resolve().parent
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 _NATURAL_SPLIT = re.compile(r"(\d+)")
@@ -339,10 +339,29 @@ class JmComicPlugin(PicaMixin, Star):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return None
-        task = loop.create_task(async_func(*args))
+        task = loop.create_task(self._run_background(async_func, args))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
+
+    async def _run_background(self, async_func, args):
+        """后台任务的统一兜底：异常写日志，并尽量把错误回给用户，避免「发完就没反应」。"""
+        try:
+            return await async_func(*args)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                f"后台任务 {getattr(async_func, '__name__', async_func)} 执行失败: "
+                f"{traceback.format_exc()}"
+            )
+            event = args[0] if args else None
+            if hasattr(event, "send"):
+                try:
+                    await self._safe_send(event, f"命令执行出错: {exc}")
+                except Exception:  # pragma: no cover
+                    pass
+            return None
 
     async def _warmup(self):
         try:

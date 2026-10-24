@@ -200,13 +200,13 @@ class PicaClient:
         except OSError:
             pass
 
-    async def ensure_token(self, force: bool = False):
+    async def ensure_token(self, force: bool = False) -> str:
         if self.token and not force:
-            return
+            return self.token
         async with self._login_lock:
             if self.token and not force:
-                return
-            await self.login()
+                return self.token
+            return await self.login()
 
     async def login(self) -> str:
         if not self.account or not self.password:
@@ -306,7 +306,20 @@ class PicaClient:
             path = "/" + path
         return f"{server}/static{path}"
 
+    @staticmethod
+    def thumb_url(comic: Dict[str, Any]) -> str:
+        """封面图地址；搜索/详情返回的 thumb 结构与 media 一致。"""
+        thumb = comic.get("thumb") or {}
+        server = str(thumb.get("fileServer") or "").rstrip("/")
+        path = str(thumb.get("path") or "")
+        if not path:
+            return ""
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{server}/static{path}"
+
     async def download_image(self, url: str, dest: Path) -> Path:
+        dest = Path(dest)
         if not url:
             raise PicaError("图片地址为空")
         dest.parent.mkdir(parents=True, exist_ok=True)

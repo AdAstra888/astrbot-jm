@@ -224,3 +224,10 @@ pip-install-*/
 pip-target-*/
 pip-unpack-*/
 
+
+.pixiv_auth.py
+.pixiv_login.json
+.pixiv_tokens.json
+get_pixiv_token.bat
+获取Pixiv令牌.bat
+.pixiv_*
