@@ -231,3 +231,4 @@ pip-unpack-*/
 get_pixiv_token.bat
 获取Pixiv令牌.bat
 .pixiv_*
+.probe_token.json

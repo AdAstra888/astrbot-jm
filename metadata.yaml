@@ -1,6 +1,6 @@
 name: astrbot_plugin_jmcomics
 display_name: jm漫画下载搜索
 desc: 提供 JMComic 与哔咔（PicACG）的搜索、下载、PDF/ZIP 发送、排行榜、详情与封面，以及下载进度、停止下载、随机推荐、定时清理、并发控制和 PDF 缓存。
-version: 3.5.1
+version: 3.5.2
 author: SuiseiKat
 repo: https://github.com/AdAstra888/astrbot-jm

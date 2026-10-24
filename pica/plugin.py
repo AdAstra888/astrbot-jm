@@ -432,9 +432,9 @@ class PicaMixin:
                 f"发送「/pica stop」可停止",
             )
             try:
-                pages = await self._pica_call(
-                    client.pages, comic_id, str(episode.get("_id") or "")
-                )
+                # 接口要的是章节的 order（序号），不是 _id；传 _id 时部分本子会返回 --
+                episode_ref = str(episode.get("order") or index)
+                pages = await self._pica_call(client.pages, comic_id, episode_ref)
             except PicaError as exc:
                 # 旧章节可能已下架/需要解锁，单章失败不应毁掉整本
                 failed_episodes.append(f"{index}.{ep_title}（{exc}）")
@@ -623,7 +623,11 @@ class PicaMixin:
         total = self._pica_total(data)
         lines = [f"哔咔搜索「{keyword}」第 {page} 页（共 {total} 本）："]
         lines.extend(self._pica_comic_line(index, doc) for index, doc in enumerate(docs[:10], 1))
-        lines.append("发送 /pica <ID> 开始下载")
+        self._remember_ids(
+            self._safe_user_dir(event.get_sender_id()), "pica",
+            [str(doc.get("_id")) for doc in docs[:10]],
+        )
+        lines.append("直接回「/pica 序号」下载，例如 /pica 3")
         await self._safe_send(event, "\n".join(lines))
 
     async def _do_pica_detail(self, event: AstrMessageEvent, comic_id: str):
@@ -710,7 +714,11 @@ class PicaMixin:
             return await self._safe_send(event, "哔咔排行榜暂时没有数据")
         lines = [f"哔咔排行榜（{rank_type}）："]
         lines.extend(self._pica_comic_line(index, doc) for index, doc in enumerate(docs[:10], 1))
-        lines.append("发送 /pica <ID> 开始下载")
+        self._remember_ids(
+            self._safe_user_dir(event.get_sender_id()), "pica",
+            [str(doc.get("_id")) for doc in docs[:10]],
+        )
+        lines.append("直接回「/pica 序号」下载，例如 /pica 3")
         await self._safe_send(event, "\n".join(lines))
 
     async def _do_pica_favorites(self, event: AstrMessageEvent, page: int = 1):
@@ -726,7 +734,11 @@ class PicaMixin:
             return await self._safe_send(event, f"哔咔收藏夹第 {page} 页是空的")
         lines = [f"哔咔收藏夹第 {page} 页（共 {self._pica_total(data)} 本）："]
         lines.extend(self._pica_comic_line(index, doc) for index, doc in enumerate(docs[:10], 1))
-        lines.append("发送 /pica <ID> 开始下载")
+        self._remember_ids(
+            self._safe_user_dir(event.get_sender_id()), "pica",
+            [str(doc.get("_id")) for doc in docs[:10]],
+        )
+        lines.append("直接回「/pica 序号」下载，例如 /pica 3")
         await self._safe_send(event, "\n".join(lines))
 
     async def _do_pica_rand(self, event: AstrMessageEvent, keyword: str = "", period: str = "day"):
@@ -760,9 +772,11 @@ class PicaMixin:
                 event, "哔咔这批都推荐过了，换个关键词或明天再看吧"
             )
         pick = random.choice(candidates)
+        self._remember_ids(self._safe_user_dir(event.get_sender_id()), "pica", [str(pick["_id"])])
         await self._safe_send(
             event,
-            f"哔咔随机推荐：《{pick.get('title')}》 {pick.get('_id')}，详情如下",
+            f"哔咔随机推荐：《{pick.get('title')}》 {pick.get('_id')}，详情如下\n"
+            f"直接回「/pica 1」下载这本",
         )
         await self._do_pica_detail(event, str(pick["_id"]))
         self._mark_album_sent(f"pica_{pick['_id']}")
@@ -792,6 +806,12 @@ class PicaMixin:
     # ------------------------------------------------------------------
     async def _accept_pica_entry(self, event: AstrMessageEvent) -> List[Any]:
         sub, args = self._split_pica_subcommand(event.message_str)
+        if sub == "search" and args and args[0].isdigit():
+            alias = self._resolve_alias(
+                self._safe_user_dir(event.get_sender_id()), "pica", args[0]
+            )
+            if alias:
+                sub, args = "download", [alias] + args[1:]
         if sub == "help":
             return [event.plain_result(self._pica_help_text())]
         if not self._pica_configured():
@@ -925,6 +945,9 @@ class PicaMixin:
             "/pica clean           立即清理过期文件\n"
             "/pica login           检查登录状态\n"
             "/pica help            这条说明\n"
+            "\n"
+            "不想记 ID：搜完/看完榜单后直接回「/pica 序号」，\n"
+            "比如列表里第 3 本，就发 /pica 3（序号 30 分钟内有效）。\n"
             "\n"
             "中文子命令也认：下载、搜索、排行、详情、章节、收藏、随机、停止、清理、登录、帮助。\n"
             "JM 的命令仍然用 /jm，互不影响。\n"

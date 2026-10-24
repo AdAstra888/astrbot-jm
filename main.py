@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-JMComic & PicACG 下载插件 - 3.5.1
+JMComic & PicACG 下载插件 - 3.5.2
 
 3.5.0 主要变更（新增哔咔漫画）：
 - 新增 /pica 命令族（下载 / 章节 / 搜索 / 详情 / 排行榜 / 随机 / 收藏 / 停止）
@@ -106,7 +106,7 @@ except ImportError:  # pragma: no cover
     PDF_AVAILABLE = False
     logger.error("PDF 库未安装，请执行: pip install img2pdf Pillow")
 
-VERSION = "3.5.1"
+VERSION = "3.5.2"
 BASE_DIR = Path(__file__).resolve().parent
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 _NATURAL_SPLIT = re.compile(r"(\d+)")
@@ -242,6 +242,8 @@ class JmComicPlugin(PicaMixin, Star):
         self.auto_cleanup_days = self._config_int("auto_cleanup_days", 0, 0)
         self.sent_albums_path = self.global_base_dir / "sent_albums.json"
         self._sent_albums: Dict[str, float] = self._load_sent_albums()
+        # 列表里的临时序号：{user_key: {"platform","ids","at"}}，只放内存，30 分钟过期
+        self._recent_ids: Dict[str, Dict[str, Any]] = {}
 
         if not self.config.get("enable_jm_log", False):
             JmModuleConfig.disable_jm_log()
@@ -362,6 +364,42 @@ class JmComicPlugin(PicaMixin, Star):
                 except Exception:  # pragma: no cover
                     pass
             return None
+
+    # ------------------------------------------------------------------
+    # 临时序号（列表里第 N 本）
+    # ------------------------------------------------------------------
+    _alias_ttl = 30 * 60
+    _alias_max_users = 200
+
+    def _remember_ids(self, user_key: str, platform: str, ids: List[str]):
+        """记住最近一次列表（搜索结果/排行榜/随机）里的本子 ID，供 /jm 3 这类短序号使用。"""
+        cleaned = [str(item) for item in (ids or []) if str(item or "").strip()][:50]
+        if not cleaned:
+            return
+        now = time.time()
+        if len(self._recent_ids) >= self._alias_max_users:
+            for key in sorted(self._recent_ids, key=lambda k: self._recent_ids[k]["at"])[
+                : self._alias_max_users // 4
+            ]:
+                self._recent_ids.pop(key, None)
+        self._recent_ids[user_key] = {"platform": platform, "ids": cleaned, "at": now}
+
+    def _resolve_alias(self, user_key: str, platform: str, token: str) -> Optional[str]:
+        """把「3」解析成上一次列表里第 3 本的 ID；不是合法序号就返回 None。"""
+        text = str(token or "").strip()
+        if not text.isdigit():
+            return None
+        entry = self._recent_ids.get(user_key)
+        if not entry or entry.get("platform") != platform:
+            return None
+        if time.time() - float(entry.get("at") or 0) > self._alias_ttl:
+            self._recent_ids.pop(user_key, None)
+            return None
+        ids = entry.get("ids") or []
+        index = int(text)
+        if 1 <= index <= len(ids):
+            return str(ids[index - 1])
+        return None
 
     async def _warmup(self):
         try:
@@ -1233,10 +1271,14 @@ class JmComicPlugin(PicaMixin, Star):
                 return
             page_count = getattr(search_page, "page_count", 1)
             lines = [f"搜索「{keyword}」结果（第{page}/{page_count}页）："]
+            ids: List[str] = []
             for index, (album_id, info) in enumerate(content[:10], 1):
                 title = info.get("name", "未知标题") if isinstance(info, dict) else str(info)
+                ids.append(str(album_id))
                 lines.append(f"{index}. ID: {album_id} | {title[:60]}")
             lines.append(f"共{getattr(search_page, 'total', len(content))}条")
+            self._remember_ids(self._safe_user_dir(event.get_sender_id()), "jm", ids)
+            lines.append("直接回「/jm 序号」下载，例如 /jm 3")
             await self._safe_send(event, "\n".join(lines))
         except (asyncio.TimeoutError, TimeoutError):
             await self._safe_send(event, "搜索超时，请稍后重试")
@@ -1262,10 +1304,14 @@ class JmComicPlugin(PicaMixin, Star):
                 await self._safe_send(event, "暂无数据")
                 return
             lines = [f"{rank_type}榜 第{page}页："]
+            ids: List[str] = []
             for index, (album_id, info) in enumerate(content[:10], 1):
                 title = info.get("name", "未知标题") if isinstance(info, dict) else str(info)
+                ids.append(str(album_id))
                 lines.append(f"{index}. ID: {album_id} | {title[:60]}")
             lines.append(f"共{len(content)}条")
+            self._remember_ids(self._safe_user_dir(event.get_sender_id()), "jm", ids)
+            lines.append("直接回「/jm 序号」下载，例如 /jm 3")
             await self._safe_send(event, "\n".join(lines))
         except (asyncio.TimeoutError, TimeoutError):
             await self._safe_send(event, "获取排行榜超时，请稍后重试")
@@ -1393,7 +1439,11 @@ class JmComicPlugin(PicaMixin, Star):
                 )
                 return
             label = f"「{keyword}」" if keyword else self._RAND_LABELS.get(period, "今日榜")
-            await self._safe_send(event, f"随机推荐（{label}）：本子 {picked}，详情如下")
+            self._remember_ids(self._safe_user_dir(event.get_sender_id()), "jm", [picked])
+            await self._safe_send(
+                event, f"随机推荐（{label}）：本子 {picked}，详情如下\n"
+                       f"直接回「/jm 1」下载这本"
+            )
             await self._do_detail(event, picked)
             self._mark_album_sent(picked)
         except (asyncio.TimeoutError, TimeoutError):
@@ -1616,6 +1666,9 @@ class JmComicPlugin(PicaMixin, Star):
             return [event.plain_result(denied)]
         try:
             album_id, chapter_range, extra = self._parse_album_command(args, 0)
+            alias = self._resolve_alias(self._safe_user_dir(event.get_sender_id()), "jm", album_id)
+            if alias:
+                album_id = alias
             if pack and extra:
                 raise ValueError("/jm zip 不支持 --quality/--max-size，打包始终使用原图")
             quality = self._parse_int(
@@ -1734,6 +1787,9 @@ class JmComicPlugin(PicaMixin, Star):
             "/jm d 123            只看详情，不下载\n"
             "/jm clean            立即清理过期文件\n"
             "/jm help             这条说明\n"
+            "\n"
+            "不想记 ID：搜完/看完榜单后直接回「/jm 序号」，\n"
+            "比如列表里第 3 本，就发 /jm 3（序号 30 分钟内有效）。\n"
             "\n"
             "中文子命令也认：下载、搜索、排行、详情、随机、停止、清理、帮助。\n"
             "哔咔漫画用 /pica，需先在配置里填 pica_account / pica_password。\n"

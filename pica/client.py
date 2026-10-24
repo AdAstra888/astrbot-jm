@@ -260,13 +260,14 @@ class PicaClient:
             page += 1
         return result
 
-    async def pages(self, comic_id: str, episode_id: str, max_pages: int = 20) -> List[Dict[str, Any]]:
+    async def pages(self, comic_id: str, episode_ref: str, max_pages: int = 20) -> List[Dict[str, Any]]:
+        """episode_ref 传章节的 order（序号，1 起），不是 _id。"""
         result: List[Dict[str, Any]] = []
         seen = set()
         page = 1
         while page <= max_pages:
             data = await self._request(
-                "GET", f"comics/{comic_id}/order/{episode_id}/pages?page={page}"
+                "GET", f"comics/{comic_id}/order/{episode_ref}/pages?page={page}"
             )
             docs = [doc for doc in ((data.get("pages") or {}).get("docs") or []) if isinstance(doc, dict)]
             added = 0

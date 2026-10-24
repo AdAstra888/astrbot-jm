@@ -907,6 +907,57 @@ def test_pica_rand_with_keyword(tmp_path: Path):
     assert "pica_abcdef0123456789abcdef01" in plugin._sent_albums
 
 
+def test_alias_roundtrip(tmp_path: Path):
+    import time
+
+    plugin = build_plugin(tmp_path)
+    key = plugin._safe_user_dir("u1")
+    plugin._remember_ids(key, "jm", ["111", "222", "333"])
+    assert plugin._resolve_alias(key, "jm", "2") == "222"
+    assert plugin._resolve_alias(key, "jm", "4") is None
+    assert plugin._resolve_alias(key, "pica", "1") is None
+    assert plugin._resolve_alias(key, "jm", "abc") is None
+    plugin._recent_ids[key]["at"] = time.time() - plugin._alias_ttl - 5
+    assert plugin._resolve_alias(key, "jm", "1") is None
+    assert key not in plugin._recent_ids
+
+
+def test_pica_pages_use_episode_order(tmp_path: Path):
+    import asyncio
+    import threading
+
+    plugin = build_plugin(tmp_path)
+    seen = {}
+
+    class _FakeClient:
+        async def comic(self, comic_id):
+            return {"title": "测试本子", "epsCount": 1}
+
+        async def episodes(self, comic_id):
+            return [{"_id": "deadbeefdeadbeefdeadbeef", "title": "第一话", "order": 7}]
+
+        async def pages(self, comic_id, episode_ref):
+            seen["ref"] = episode_ref
+            return [{"media": {"fileServer": "https://x", "path": "1.jpg"}}]
+
+        def image_url(self, page):
+            return "https://x/static/1.jpg"
+
+        async def download_image(self, url, dest):
+            dest.write_bytes(b"fake")
+
+    async def _fake_send_file(event, path, caption):
+        return True
+
+    plugin._get_pica_client = lambda: _FakeClient()
+    plugin._send_file = _fake_send_file
+    job = {"cancel": threading.Event(), "stage": ""}
+    asyncio.run(
+        plugin._pica_download_and_send(_FakeEvent(), "abc123", "all", None, True, 85, 0, job)
+    )
+    assert seen["ref"] == "7"
+
+
 def main() -> int:
     import shutil
     import os
@@ -953,6 +1004,8 @@ def main() -> int:
         test_pica_ranking_accepts_list_payload,
         test_pica_login_reports_token,
         test_pica_rand_with_keyword,
+        test_alias_roundtrip,
+        test_pica_pages_use_episode_order,
     ]
     for index, test in enumerate(tests):
         case_dir = base / f"{index:02d}_{test.__name__}"
